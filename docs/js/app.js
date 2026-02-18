@@ -40,7 +40,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         document.getElementById('input-weight').value = '';
         document.getElementById('input-fat').value = '';
-        refreshRecent();
+
+        // Switch to Charts tab
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        document.querySelector('[data-target="charts-tab"]').classList.add('active');
+        document.getElementById('charts-tab').classList.add('active');
+        refreshCharts();
     });
 
     // ── Recent entries ─────────────────────────────────

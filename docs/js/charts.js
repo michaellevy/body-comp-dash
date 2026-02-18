@@ -10,11 +10,12 @@ const BASE_LAYOUT = {
     margin: { l: 48, r: 16, t: 8, b: 28 },
     showlegend: false,
 };
-const TURBO = [
-    [0, '#30123b'], [0.1, '#4662d7'], [0.2, '#36aaf9'],
-    [0.3, '#1ae4b6'], [0.4, '#72fe5e'], [0.5, '#c8ef34'],
-    [0.6, '#faba39'], [0.7, '#f66b19'], [0.8, '#e11f0c'],
-    [0.9, '#a2023a'], [1, '#7a0403'],
+// Reversed Viridis — darker (purple) = higher fat%
+const VIRIDIS_R = [
+    [0, '#fde725'], [0.1, '#b5de2b'], [0.2, '#6ece58'],
+    [0.3, '#35b779'], [0.4, '#1f9e89'], [0.5, '#26828e'],
+    [0.6, '#31688e'], [0.7, '#3e4989'], [0.8, '#482878'],
+    [0.9, '#440154'], [1, '#440154'],
 ];
 const HOVERLABEL = { bgcolor: 'white', font: { size: 12, family: FONT.family } };
 const CFG = { displayModeBar: false, responsive: true };
@@ -25,7 +26,6 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     stdDays = stdDays || 20;
     if (dates.length < 3) return { x: dates, y: values };
 
-    // Build daily series via linear interpolation
     const ts = dates.map(d => new Date(d).getTime());
     const dayMs = 86400000;
     const start = ts[0], end = ts[ts.length - 1];
@@ -46,7 +46,6 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
         }
     }
 
-    // Gaussian-weighted rolling mean (centered)
     const half = Math.floor(windowDays / 2);
     const smoothed = [];
     for (let i = 0; i < dailyY.length; i++) {
@@ -70,7 +69,7 @@ function renderWeightChart(el, data) {
     const weights = data.map(r => r.weight);
     const fatPcts = data.map(r => r.fat_percent_cal != null ? r.fat_percent_cal : r.fat_percent);
     const nDays = (new Date(dates[dates.length - 1]) - new Date(dates[0])) / 86400000;
-    const ptSize = nDays < 500 ? 12 : 8;
+    const ptSize = nDays < 500 ? 19 : 13;
 
     const validFat = fatPcts.filter(f => f != null);
     const cmin = validFat.length ? Math.min(...validFat) : 10;
@@ -83,7 +82,7 @@ function renderWeightChart(el, data) {
             x: dates, y: weights, mode: 'markers',
             marker: {
                 size: ptSize, color: fatPcts,
-                colorscale: TURBO, cmin, cmax,
+                colorscale: VIRIDIS_R, cmin, cmax,
                 colorbar: { title: { text: '% Fat', font: { size: 12 } }, thickness: 16, len: 0.6, tickfont: { size: 11 } },
                 line: { width: 0.5, color: 'white' },
             },
@@ -112,7 +111,7 @@ function renderMuscleFatChart(el, data) {
     const smM = gaussianSmooth(dates, muscle);
     const smF = gaussianSmooth(dates, fat);
 
-    const mkMarker = () => ({ size: 9, color: 'slateblue', opacity: 1, line: { width: 0.5, color: 'white' } });
+    const mkMarker = () => ({ size: 14, color: 'slateblue', opacity: 1, line: { width: 0.5, color: 'white' } });
 
     const traces = [
         { x: dates, y: muscle, mode: 'markers', marker: mkMarker(), xaxis: 'x', yaxis: 'y',
@@ -188,8 +187,8 @@ function renderPathChart(el, data) {
 
         const signM = dx >= 0 ? '+' : '', signF = dy >= 0 ? '+' : '';
         hoverTraces.push({
-            x: [(q0.muscle + q1.muscle) / 2],
-            y: [(q0.fat + q1.fat) / 2],
+            x: [((q0.muscle + q1.muscle) / 2).toFixed(4)],
+            y: [((q0.fat + q1.fat) / 2).toFixed(4)],
             mode: 'markers',
             marker: { size: 14, opacity: 0 },
             hovertemplate: `<b>${q1.label}</b><br>Muscle: ${signM}${dx.toFixed(1)} lbs<br>Fat: ${signF}${dy.toFixed(1)} lbs<extra></extra>`,
@@ -200,8 +199,8 @@ function renderPathChart(el, data) {
 
     const layout = {
         ...BASE_LAYOUT, height: 400,
-        xaxis: { ...BASE_LAYOUT.xaxis, title: 'Muscle (pounds)' },
-        yaxis: { ...BASE_LAYOUT.yaxis, title: 'Fat (pounds)', scaleanchor: 'x', scaleratio: 1 },
+        xaxis: { ...BASE_LAYOUT.xaxis, title: 'Muscle (pounds)', type: 'linear' },
+        yaxis: { ...BASE_LAYOUT.yaxis, title: 'Fat (pounds)', scaleanchor: 'x', scaleratio: 1, type: 'linear' },
         annotations,
     };
 
