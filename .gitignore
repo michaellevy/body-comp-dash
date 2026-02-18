@@ -1,0 +1,10 @@
+body_comp.db
+service_account.json
+__pycache__/
+*.pyc
+.env
+.Rhistory
+*.png
+!assets/*.png
+*.csv
+.DS_Store

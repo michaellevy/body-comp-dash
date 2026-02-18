@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: body-comp-dash
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:server --bind 0.0.0.0:$PORT
+    envVars:
+      - key: DASH_DEBUG
+        value: "false"
+      - key: PYTHON_VERSION
+        value: "3.11.6"

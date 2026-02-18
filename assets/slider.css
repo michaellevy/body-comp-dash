@@ -1,0 +1,4 @@
+/* Hide the numeric input box next to the slider */
+.dash-range-slider-input {
+    display: none !important;
+}
