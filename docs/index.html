@@ -18,7 +18,6 @@
     <div class="tabs">
         <div class="tab active" data-target="log-tab">Log</div>
         <div class="tab" data-target="charts-tab">Charts</div>
-        <div class="tab" data-target="settings-tab">Settings</div>
     </div>
 
     <!-- Log Tab -->
@@ -65,44 +64,6 @@
 
         <div class="card" style="padding:6px 8px 2px">
             <div id="path-chart" class="chart-container"></div>
-        </div>
-    </div>
-
-    <!-- Settings Tab -->
-    <div id="settings-tab" class="tab-content">
-        <div class="card">
-            <div class="recent-header">Cloud Backup (Supabase)</div>
-            <label for="supa-url">Project URL</label>
-            <input type="text" id="supa-url" class="mb" style="font-size:0.85rem;height:2.5rem"
-                   placeholder="https://xyz.supabase.co">
-            <label for="supa-key">Anon Key</label>
-            <input type="text" id="supa-key" class="mb" style="font-size:0.85rem;height:2.5rem"
-                   placeholder="eyJ...">
-            <button id="supa-save" style="width:100%;height:2.5rem;margin-bottom:8px;font-family:inherit;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer">
-                Save Config
-            </button>
-            <div style="display:flex;gap:8px;margin-bottom:8px">
-                <button id="sync-pull" style="flex:1;height:2.5rem;font-family:inherit;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer">
-                    Pull from Cloud
-                </button>
-                <button id="sync-push" style="flex:1;height:2.5rem;font-family:inherit;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer">
-                    Push to Cloud
-                </button>
-            </div>
-            <div id="supa-status" style="font-size:0.85rem;min-height:1.2em"></div>
-        </div>
-
-        <div class="card">
-            <div class="recent-header">Local Data</div>
-            <div style="display:flex;gap:8px">
-                <button id="export-btn" style="flex:1;height:2.5rem;font-family:inherit;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer">
-                    Export JSON
-                </button>
-                <label style="flex:1;height:2.5rem;display:flex;align-items:center;justify-content:center;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer;font-size:1rem;color:#111827">
-                    Import JSON
-                    <input type="file" id="import-file" accept=".json" style="display:none">
-                </label>
-            </div>
         </div>
     </div>
 

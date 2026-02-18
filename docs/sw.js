@@ -1,4 +1,4 @@
-const CACHE = 'bodycomp-v3';
+const CACHE = 'bodycomp-v4';
 const ASSETS = [
     './',
     './index.html',

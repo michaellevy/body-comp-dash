@@ -110,66 +110,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         charts.renderPathChart('path-chart', cal);
     }
 
-    // ── Settings (Supabase) ────────────────────────────
-    const settingsBtn = document.getElementById('settings-btn');
-    const settingsPanel = document.getElementById('settings-panel');
-    if (settingsBtn) {
-        settingsBtn.addEventListener('click', () => {
-            settingsPanel.style.display = settingsPanel.style.display === 'none' ? 'block' : 'none';
-        });
-    }
-
-    document.getElementById('supa-save')?.addEventListener('click', () => {
-        const url = document.getElementById('supa-url').value.trim();
-        const key = document.getElementById('supa-key').value.trim();
-        if (url && key) {
-            db.setSupa(url, key);
-            document.getElementById('supa-status').textContent = 'Saved.';
-            document.getElementById('supa-status').className = 'ok';
-        }
-    });
-
-    document.getElementById('sync-pull')?.addEventListener('click', async () => {
-        const n = await db.syncFromCloud();
-        document.getElementById('supa-status').textContent = `Pulled ${n} rows.`;
-        document.getElementById('supa-status').className = 'ok';
-        refreshRecent();
-    });
-
-    document.getElementById('sync-push')?.addEventListener('click', async () => {
-        const n = await db.syncToCloud();
-        document.getElementById('supa-status').textContent = `Pushed ${n} rows.`;
-        document.getElementById('supa-status').className = 'ok';
-    });
-
-    document.getElementById('export-btn')?.addEventListener('click', async () => {
-        const all = await db.getAllMeasurements();
-        const blob = new Blob([db.exportJSON(all)], { type: 'application/json' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = `bodycomp-${new Date().toISOString().slice(0, 10)}.json`;
-        a.click();
-    });
-
-    document.getElementById('import-file')?.addEventListener('change', async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        const text = await file.text();
-        const data = JSON.parse(text);
-        const n = await db.importJSON(data);
-        document.getElementById('supa-status').textContent = `Imported ${n} rows.`;
-        document.getElementById('supa-status').className = 'ok';
-        refreshRecent();
-    });
-
     // ── Init ───────────────────────────────────────────
-    // Populate Supabase fields if configured
+    // Auto-sync from cloud on load
     if (db.supaConfigured()) {
-        const url = localStorage.getItem('supa_url');
-        const key = localStorage.getItem('supa_key');
-        if (document.getElementById('supa-url')) document.getElementById('supa-url').value = url;
-        if (document.getElementById('supa-key')) document.getElementById('supa-key').value = key;
-        // Auto-sync from cloud on load
         db.syncFromCloud().then(() => refreshRecent());
     }
 
