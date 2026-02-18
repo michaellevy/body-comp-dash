@@ -135,13 +135,31 @@ async function syncFromCloud() {
 }
 
 async function syncToCloud() {
-    // Push all local data to cloud
+    // Push all local data to cloud in batches
     if (!supaConfigured()) return 0;
     const local = await localGetAll();
+    const BATCH = 100;
     let count = 0;
-    for (const row of local) {
-        await supaUpsert(row);
-        count++;
+    for (let i = 0; i < local.length; i += BATCH) {
+        const chunk = local.slice(i, i + BATCH).map(r => ({
+            date: r.date, weight: r.weight, fat_percent: r.fat_percent,
+        }));
+        try {
+            const res = await fetch(`${SUPA_URL}/rest/v1/measurements`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': SUPA_KEY,
+                    'Authorization': `Bearer ${SUPA_KEY}`,
+                    'Prefer': 'resolution=merge-duplicates',
+                },
+                body: JSON.stringify(chunk),
+            });
+            if (!res.ok) throw new Error(res.statusText);
+            count += chunk.length;
+        } catch (e) {
+            console.warn(`Batch push failed at row ${i}:`, e.message);
+        }
     }
     return count;
 }
