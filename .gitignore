@@ -6,5 +6,6 @@ __pycache__/
 .Rhistory
 *.png
 !assets/*.png
+!docs/*.png
 *.csv
 .DS_Store

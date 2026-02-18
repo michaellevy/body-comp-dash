@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111827">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Body Comp</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icon-192.png">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- Tabs -->
+    <div class="tabs">
+        <div class="tab active" data-target="log-tab">Log</div>
+        <div class="tab" data-target="charts-tab">Charts</div>
+        <div class="tab" data-target="settings-tab">Settings</div>
+    </div>
+
+    <!-- Log Tab -->
+    <div id="log-tab" class="tab-content active">
+        <div class="card" style="padding:20px">
+            <label for="input-date">Date</label>
+            <input type="date" id="input-date" class="mb">
+
+            <div class="row mb">
+                <div>
+                    <label for="input-weight">Weight (lbs)</label>
+                    <input type="number" id="input-weight" step="0.1" inputmode="decimal">
+                </div>
+                <div>
+                    <label for="input-fat">Fat %</label>
+                    <input type="number" id="input-fat" step="0.1" inputmode="decimal">
+                </div>
+            </div>
+
+            <button id="save-btn">Save</button>
+            <div id="feedback"></div>
+        </div>
+
+        <div class="card">
+            <div class="recent-header">Recent</div>
+            <div id="recent-entries"><div class="muted">No entries yet.</div></div>
+        </div>
+    </div>
+
+    <!-- Charts Tab -->
+    <div id="charts-tab" class="tab-content">
+        <div class="card" style="padding:18px 14px 10px">
+            <div id="slider-label"></div>
+            <input type="range" id="range-slider" min="0" max="120" value="108" step="1">
+        </div>
+
+        <div class="card" style="padding:6px 8px 2px">
+            <div id="weight-chart" class="chart-container"></div>
+        </div>
+
+        <div class="card" style="padding:6px 8px 2px">
+            <div id="muscle-fat-chart" class="chart-container"></div>
+        </div>
+
+        <div class="card" style="padding:6px 8px 2px">
+            <div id="path-chart" class="chart-container"></div>
+        </div>
+    </div>
+
+    <!-- Settings Tab -->
+    <div id="settings-tab" class="tab-content">
+        <div class="card">
+            <div class="recent-header">Cloud Backup (Supabase)</div>
+            <label for="supa-url">Project URL</label>
+            <input type="text" id="supa-url" class="mb" style="font-size:0.85rem;height:2.5rem"
+                   placeholder="https://xyz.supabase.co">
+            <label for="supa-key">Anon Key</label>
+            <input type="text" id="supa-key" class="mb" style="font-size:0.85rem;height:2.5rem"
+                   placeholder="eyJ...">
+            <button id="supa-save" style="width:100%;height:2.5rem;margin-bottom:8px;font-family:inherit;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer">
+                Save Config
+            </button>
+            <div style="display:flex;gap:8px;margin-bottom:8px">
+                <button id="sync-pull" style="flex:1;height:2.5rem;font-family:inherit;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer">
+                    Pull from Cloud
+                </button>
+                <button id="sync-push" style="flex:1;height:2.5rem;font-family:inherit;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer">
+                    Push to Cloud
+                </button>
+            </div>
+            <div id="supa-status" style="font-size:0.85rem;min-height:1.2em"></div>
+        </div>
+
+        <div class="card">
+            <div class="recent-header">Local Data</div>
+            <div style="display:flex;gap:8px">
+                <button id="export-btn" style="flex:1;height:2.5rem;font-family:inherit;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer">
+                    Export JSON
+                </button>
+                <label style="flex:1;height:2.5rem;display:flex;align-items:center;justify-content:center;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;cursor:pointer;font-size:1rem;color:#111827">
+                    Import JSON
+                    <input type="file" id="import-file" accept=".json" style="display:none">
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Plotly.js (from CDN) -->
+    <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+    <script src="js/db.js"></script>
+    <script src="js/calibration.js"></script>
+    <script src="js/charts.js"></script>
+    <script src="js/app.js"></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js');
+        }
+    </script>
+</body>
+</html>
