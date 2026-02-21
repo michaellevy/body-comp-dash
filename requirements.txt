@@ -3,4 +3,5 @@ dash-bootstrap-components>=1.5
 plotly>=5.18,<6
 pandas>=2.0
 numpy>=1.24
+scipy>=1.11
 gunicorn>=21.2
