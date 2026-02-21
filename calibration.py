@@ -1,18 +1,20 @@
 """Body composition calibration using gold-standard scans.
 
-Fat% correction — time-varying piecewise-linear bias removal
-------------------------------------------------------------
+Fat% correction — weight-varying piecewise-linear bias removal
+--------------------------------------------------------------
 The home BIA scale systematically over-estimates fat% in muscular
 individuals, and this bias grows as lean mass increases (the BIA
 algorithm interprets lower impedance as "more fat" rather than "more
 muscle").  We correct for this with a bias function fitted to all
-gold-standard measurements (InBody + hydrostatic) and interpolated
-(or linearly extrapolated) to every scale date.
+gold-standard measurements (InBody + hydrostatic), using raw scale
+weight as the independent variable rather than time.
 
-    corrected_fat% = scale_fat% − bias(date)
+    corrected_fat% = scale_fat% − bias(scale_weight)
 
-where bias(date) is piecewise-linear between calibration anchors with
-linear extrapolation beyond the boundary segments.
+Using weight (a proxy for LBM) rather than time means the correction
+stays flat during weight-stable phases (maintenance, cardio season)
+and only extrapolates when weight actually changes — which is when
+the BIA error is actually changing.
 
 Weight correction — constant additive offset
 --------------------------------------------
@@ -109,28 +111,38 @@ def _get_anchor_points() -> list[dict]:
 # ── Bias correction builders ─────────────────────────────────────────────────
 
 def _build_fat_pct_corrector(anchors: list[dict]):
-    """Return a vectorised function  dates -> fat% bias array.
+    """Return a vectorised function  raw_scale_weight -> fat% bias array.
 
-    Bias is defined as (scale_fat% − gold_fat%) at each anchor.
+    Bias is defined as (scale_fat% − gold_fat%) at each anchor and is
+    modelled as a function of raw scale weight rather than time.
+
+    Rationale: the BIA over-estimate grows because lean mass increases,
+    not because the calendar advances.  Using scale weight as the predictor
+    means the correction stays flat when weight is stable (e.g. a maintenance
+    or cardio-focus phase) and only extrapolates when weight actually changes.
+
     Between anchors: piecewise-linear interpolation.
     Beyond anchors: linear extrapolation along the adjacent segment.
     """
     if not anchors:
-        return lambda dates: np.zeros(len(pd.DatetimeIndex(dates)))
+        return lambda weights: np.zeros(len(weights))
 
-    # Use int64 nanoseconds (pd.Timestamp.value) as the time axis
-    t    = np.array([a["date"].value for a in anchors], dtype=np.float64)
+    w    = np.array([a["scale_weight"] for a in anchors], dtype=np.float64)
     bias = np.array([a["scale_fat_pct"] - a["gold_fat_pct"] for a in anchors])
+
+    # Sort by weight (should already be monotone given the gain trajectory,
+    # but guard against edge cases)
+    order = np.argsort(w)
+    w, bias = w[order], bias[order]
 
     if len(anchors) == 1:
         b0 = bias[0]
-        return lambda dates: np.full(len(pd.DatetimeIndex(dates)), b0)
+        return lambda weights: np.full(len(weights), b0)
 
-    fn = interp1d(t, bias, kind="linear", fill_value="extrapolate")
+    fn = interp1d(w, bias, kind="linear", fill_value="extrapolate")
 
-    def corrector(dates):
-        t_q = pd.DatetimeIndex(dates).asi8.astype(np.float64)
-        return fn(t_q)
+    def corrector(weights):
+        return fn(np.asarray(weights, dtype=np.float64))
 
     return corrector
 
@@ -153,10 +165,11 @@ def _fit_muscle_affine(anchors: list[dict], weight_bias: float, fat_corrector):
 
     home_muscle, gold_muscle = [], []
     for a in inbody:
-        # Apply the same corrections that apply_calibration will use
+        # Apply the same corrections that apply_calibration will use.
+        # fat_corrector now takes raw scale weight (not dates).
         corr_weight = a["scale_weight"] - weight_bias
         corr_fat    = float(np.clip(
-            a["scale_fat_pct"] - fat_corrector([a["date"]])[0], 5, 35
+            a["scale_fat_pct"] - fat_corrector([a["scale_weight"]])[0], 5, 35
         ))
         model_pct = float(
             estimate_muscle_percent(
@@ -198,11 +211,14 @@ def apply_calibration(df: pd.DataFrame) -> pd.DataFrame:
 
     df["weight"] = df["weight"] - weight_bias
 
-    # ── Fat% correction (time-varying) ───────────────────────────────────────
+    # ── Fat% correction (weight-varying) ─────────────────────────────────────
+    # Pass the *raw* (pre-correction) weight so the corrector operates on the
+    # same scale as the anchor scale_weight values it was fitted against.
     if mask.any():
         corrector = _build_fat_pct_corrector(anchors)
+        raw_weight = df.loc[mask, "weight"] + weight_bias  # undo weight correction
         df.loc[mask, "fat_percent"] = (
-            df.loc[mask, "fat_percent"] - corrector(df.loc[mask, "date"])
+            df.loc[mask, "fat_percent"] - corrector(raw_weight.values)
         ).clip(5, 35)
 
     # ── Muscle% estimation + affine calibration ───────────────────────────────
