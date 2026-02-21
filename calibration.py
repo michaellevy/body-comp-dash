@@ -1,18 +1,44 @@
-"""InBody calibration and body composition estimation.
+"""Body composition calibration using gold-standard scans.
 
-Estimates muscle% from weight and fat% using a linear model trained on
-historical data (old Google Sheet had a muscle column). Then calibrates
-both fat% and muscle% using an affine transform fitted to two InBody scans.
+Fat% correction — time-varying piecewise-linear bias removal
+------------------------------------------------------------
+The home BIA scale systematically over-estimates fat% in muscular
+individuals, and this bias grows as lean mass increases (the BIA
+algorithm interprets lower impedance as "more fat" rather than "more
+muscle").  We correct for this with a bias function fitted to all
+gold-standard measurements (InBody + hydrostatic) and interpolated
+(or linearly extrapolated) to every scale date.
 
-Affine transform: calibrated = a * home_value + b
-With 2 calibration points this is an exact solution, correcting both
-scale bias (multiplicative) and offset bias (additive).
+    corrected_fat% = scale_fat% − bias(date)
+
+where bias(date) is piecewise-linear between calibration anchors with
+linear extrapolation beyond the boundary segments.
+
+Weight correction — constant additive offset
+--------------------------------------------
+    corrected_weight = scale_weight − weight_bias
+
+where weight_bias is the median of (scale_weight − gold_weight) across
+all anchor dates.
+
+Muscle% — linear model + affine calibration
+-------------------------------------------
+Muscle% is estimated from corrected weight and fat% via a linear model
+trained on historical data, then corrected with a 2-point affine
+transform fitted to InBody scans (which directly measure skeletal
+muscle mass).  Hydrostatic scans are excluded from this step because
+they do not report muscle mass independently.
 """
 
+import math
 import numpy as np
 import pandas as pd
-from models import get_model_coefficients, get_inbody_scans
+from scipy.interpolate import interp1d
 
+from models import get_model_coefficients, get_inbody_scans, get_db
+
+
+# ── Muscle linear model ──────────────────────────────────────────────────────
 
 def load_muscle_model():
     """Load the muscle% ~ weight + fat% linear model coefficients."""
@@ -30,99 +56,169 @@ def estimate_muscle_percent(weight: np.ndarray, fat_percent: np.ndarray) -> np.n
     return intercept + weight * w_coef + fat_percent * f_coef
 
 
-def fit_affine_calibration():
-    """Fit affine calibration transforms using InBody scan data.
+# ── Calibration anchor computation ──────────────────────────────────────────
 
-    For each metric (fat%, muscle%), fits: calibrated = a * home + b
-    using the two InBody calibration points.
+def _get_anchor_points() -> list[dict]:
+    """For each gold-standard scan, find the proximity-weighted mean scale
+    reading within ±7 days (exponential decay, half-life = 3 days).
 
-    Returns dict with keys 'fat_percent' and 'muscle_percent', each
-    containing (slope, intercept) tuple.
+    Returns list of dicts sorted by date, each with:
+        date, source, gold_weight, gold_fat_pct, gold_muscle_mass,
+        scale_weight, scale_fat_pct
     """
     scans = get_inbody_scans()
-    if len(scans) < 2:
-        return None
+    anchors = []
 
-    # Get home scale readings on InBody scan dates
-    from models import get_db
-    scan_dates = [s["date"] for s in scans]
-
-    home_readings = []
     with get_db() as conn:
-        for sd in scan_dates:
-            row = conn.execute(
-                "SELECT weight, fat_percent FROM measurements WHERE date = ?", (sd,)
-            ).fetchone()
-            if row:
-                home_readings.append(dict(row))
-            else:
-                # Try nearest date within 2 days
-                row = conn.execute(
-                    """SELECT weight, fat_percent FROM measurements
-                       WHERE date BETWEEN date(?, '-2 days') AND date(?, '+2 days')
-                       ORDER BY ABS(julianday(date) - julianday(?)) LIMIT 1""",
-                    (sd, sd, sd),
-                ).fetchone()
-                if row:
-                    home_readings.append(dict(row))
+        for scan in scans:
+            sd = scan["date"]
+            rows = conn.execute(
+                """SELECT date, weight, fat_percent FROM measurements
+                   WHERE date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
+                     AND fat_percent IS NOT NULL
+                   ORDER BY ABS(julianday(date) - julianday(?))""",
+                (sd, sd, sd),
+            ).fetchall()
 
-    if len(home_readings) < 2:
+            if not rows:
+                continue
+
+            rows = [dict(r) for r in rows]
+            days_away = [
+                abs((pd.Timestamp(r["date"]) - pd.Timestamp(sd)).days)
+                for r in rows
+            ]
+            weights = [math.exp(-d / 3.0) for d in days_away]
+            total = sum(weights)
+            sw = sum(r["weight"]      * w for r, w in zip(rows, weights)) / total
+            sf = sum(r["fat_percent"] * w for r, w in zip(rows, weights)) / total
+
+            anchors.append({
+                "date":             pd.Timestamp(sd),
+                "source":           scan.get("source", "inbody"),
+                "gold_weight":      scan["weight"],
+                "gold_fat_pct":     scan["fat_percent"],
+                "gold_muscle_mass": scan.get("muscle_mass"),
+                "scale_weight":     sw,
+                "scale_fat_pct":    sf,
+            })
+
+    return sorted(anchors, key=lambda a: a["date"])
+
+
+# ── Bias correction builders ─────────────────────────────────────────────────
+
+def _build_fat_pct_corrector(anchors: list[dict]):
+    """Return a vectorised function  dates -> fat% bias array.
+
+    Bias is defined as (scale_fat% − gold_fat%) at each anchor.
+    Between anchors: piecewise-linear interpolation.
+    Beyond anchors: linear extrapolation along the adjacent segment.
+    """
+    if not anchors:
+        return lambda dates: np.zeros(len(pd.DatetimeIndex(dates)))
+
+    # Use int64 nanoseconds (pd.Timestamp.value) as the time axis
+    t    = np.array([a["date"].value for a in anchors], dtype=np.float64)
+    bias = np.array([a["scale_fat_pct"] - a["gold_fat_pct"] for a in anchors])
+
+    if len(anchors) == 1:
+        b0 = bias[0]
+        return lambda dates: np.full(len(pd.DatetimeIndex(dates)), b0)
+
+    fn = interp1d(t, bias, kind="linear", fill_value="extrapolate")
+
+    def corrector(dates):
+        t_q = pd.DatetimeIndex(dates).asi8.astype(np.float64)
+        return fn(t_q)
+
+    return corrector
+
+
+def _fit_muscle_affine(anchors: list[dict], weight_bias: float, fat_corrector):
+    """Fit affine  inbody_muscle% = slope * model_muscle% + intercept
+    using only InBody anchors that have a measured muscle_mass.
+
+    Uses *corrected* scale values as model inputs so the affine is
+    consistent with what apply_calibration actually feeds the model.
+
+    Falls back to None (identity) if fewer than 2 such anchors exist.
+    """
+    inbody = [
+        a for a in anchors
+        if a["source"] == "inbody" and a["gold_muscle_mass"] is not None
+    ]
+    if len(inbody) < 2:
         return None
 
-    # Estimate home muscle% at each calibration point
-    home_fat = np.array([r["fat_percent"] for r in home_readings])
-    home_weight = np.array([r["weight"] for r in home_readings])
-    home_muscle_pct = estimate_muscle_percent(home_weight, home_fat)
+    home_muscle, gold_muscle = [], []
+    for a in inbody:
+        # Apply the same corrections that apply_calibration will use
+        corr_weight = a["scale_weight"] - weight_bias
+        corr_fat    = float(np.clip(
+            a["scale_fat_pct"] - fat_corrector([a["date"]])[0], 5, 35
+        ))
+        model_pct = float(
+            estimate_muscle_percent(
+                np.array([corr_weight]),
+                np.array([corr_fat]),
+            )[0]
+        )
+        inbody_pct = 100.0 * a["gold_muscle_mass"] / a["gold_weight"]
+        home_muscle.append(model_pct)
+        gold_muscle.append(inbody_pct)
 
-    # InBody values
-    inbody_fat = np.array([s["fat_percent"] for s in scans[:2]])
-    inbody_muscle_pct = np.array(
-        [100 * s["muscle_mass"] / s["weight"] for s in scans[:2]]
-    )
+    home = np.array(home_muscle)
+    gold = np.array(gold_muscle)
+    A = np.column_stack([home, np.ones(len(home))])
+    params, _, _, _ = np.linalg.lstsq(A, gold, rcond=None)
+    return float(params[0]), float(params[1])  # slope, intercept
 
-    # Fit affine: inbody = a * home + b (2 points => exact solution)
-    def fit_affine(home_vals, inbody_vals):
-        # [home1, 1] [a]   [inbody1]
-        # [home2, 1] [b] = [inbody2]
-        A = np.column_stack([home_vals, np.ones(2)])
-        params = np.linalg.solve(A, inbody_vals)
-        return params[0], params[1]  # slope, intercept
 
-    fat_cal = fit_affine(home_fat, inbody_fat)
-    muscle_cal = fit_affine(home_muscle_pct, inbody_muscle_pct)
-
-    return {"fat_percent": fat_cal, "muscle_percent": muscle_cal}
-
+# ── Public API ───────────────────────────────────────────────────────────────
 
 def apply_calibration(df: pd.DataFrame) -> pd.DataFrame:
     """Apply full body composition pipeline to a measurements DataFrame.
 
-    Input df must have columns: date, weight, fat_percent
-    Output adds: muscle_percent, muscle_lbs, fat_lbs (all calibrated)
+    Input  columns:  date, weight, fat_percent
+    Output columns:  (all of the above, corrected) + fat_lbs, muscle_lbs
     """
     df = df.copy()
     mask = df["fat_percent"].notna()
 
-    # Estimate raw muscle%
-    df.loc[mask, "muscle_percent"] = estimate_muscle_percent(
-        df.loc[mask, "weight"].values, df.loc[mask, "fat_percent"].values
-    )
+    anchors = _get_anchor_points()
 
-    # Apply InBody affine calibration
-    cal = fit_affine_calibration()
-    if cal:
-        fat_slope, fat_intercept = cal["fat_percent"]
-        muscle_slope, muscle_intercept = cal["muscle_percent"]
+    # ── Weight correction (constant) ─────────────────────────────────────────
+    if anchors:
+        weight_bias = float(np.median(
+            [a["scale_weight"] - a["gold_weight"] for a in anchors]
+        ))
+    else:
+        weight_bias = 0.0
 
+    df["weight"] = df["weight"] - weight_bias
+
+    # ── Fat% correction (time-varying) ───────────────────────────────────────
+    if mask.any():
+        corrector = _build_fat_pct_corrector(anchors)
         df.loc[mask, "fat_percent"] = (
-            fat_slope * df.loc[mask, "fat_percent"] + fat_intercept
-        )
-        df.loc[mask, "muscle_percent"] = (
-            muscle_slope * df.loc[mask, "muscle_percent"] + muscle_intercept
-        )
+            df.loc[mask, "fat_percent"] - corrector(df.loc[mask, "date"])
+        ).clip(5, 35)
 
-    # Calculate pounds
-    df.loc[mask, "fat_lbs"] = df.loc[mask, "weight"] * df.loc[mask, "fat_percent"] / 100
+    # ── Muscle% estimation + affine calibration ───────────────────────────────
+    if mask.any():
+        muscle_pct = estimate_muscle_percent(
+            df.loc[mask, "weight"].values,
+            df.loc[mask, "fat_percent"].values,
+        )
+        muscle_affine = _fit_muscle_affine(anchors, weight_bias, corrector)
+        if muscle_affine:
+            slope, intercept = muscle_affine
+            muscle_pct = slope * muscle_pct + intercept
+        df.loc[mask, "muscle_percent"] = muscle_pct
+
+    # ── Derived pounds ────────────────────────────────────────────────────────
+    df.loc[mask, "fat_lbs"]    = df.loc[mask, "weight"] * df.loc[mask, "fat_percent"]    / 100
     df.loc[mask, "muscle_lbs"] = df.loc[mask, "weight"] * df.loc[mask, "muscle_percent"] / 100
 
     return df

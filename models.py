@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS inbody_scans (
     date DATE NOT NULL,
     weight REAL,
     fat_percent REAL,
-    muscle_mass REAL
+    muscle_mass REAL,
+    source TEXT DEFAULT 'inbody'
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -58,6 +59,20 @@ def get_db():
 def init_db():
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        # Safe migration: add source column to inbody_scans if it doesn't exist yet
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(inbody_scans)").fetchall()]
+        if "source" not in cols:
+            conn.execute("ALTER TABLE inbody_scans ADD COLUMN source TEXT DEFAULT 'inbody'")
+
+        # Data migration: insert hydrostatic scan if not already present
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM inbody_scans WHERE date = '2026-02-20'"
+        ).fetchone()[0]
+        if not existing:
+            conn.execute(
+                """INSERT INTO inbody_scans (date, weight, fat_percent, muscle_mass, source)
+                   VALUES ('2026-02-20', 181.5, 13.2, NULL, 'hydrostatic')"""
+            )
 
 
 def add_measurement(dt: date, weight: float, fat_percent: float = None, source: str = "app"):
@@ -93,11 +108,12 @@ def get_inbody_scans():
     return [dict(r) for r in rows]
 
 
-def add_inbody_scan(dt: date, weight: float, fat_percent: float, muscle_mass: float):
+def add_inbody_scan(dt: date, weight: float, fat_percent: float,
+                    muscle_mass: float = None, source: str = "inbody"):
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO inbody_scans (date, weight, fat_percent, muscle_mass) VALUES (?, ?, ?, ?)",
-            (dt.isoformat(), weight, fat_percent, muscle_mass),
+            "INSERT INTO inbody_scans (date, weight, fat_percent, muscle_mass, source) VALUES (?, ?, ?, ?, ?)",
+            (dt.isoformat(), weight, fat_percent, muscle_mass, source),
         )
 
 
