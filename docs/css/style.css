@@ -103,6 +103,20 @@ button#supa-save-btn {
 }
 button#supa-save-btn:active { background: #e5e7eb; }
 
+button#clear-cache-btn {
+    width: 100%;
+    height: 3rem;
+    font-size: 1rem;
+    font-weight: 500;
+    font-family: inherit;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #f3f4f6;
+    color: #6b7280;
+    cursor: pointer;
+}
+button#clear-cache-btn:active { background: #e5e7eb; }
+
 button#save-btn {
     width: 100%;
     height: 3rem;

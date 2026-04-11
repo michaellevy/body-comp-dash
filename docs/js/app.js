@@ -22,6 +22,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     supaUrlInput.value = localStorage.getItem('supa_url') || '';
     supaKeyInput.value = localStorage.getItem('supa_key') || '';
 
+    document.getElementById('clear-cache-btn').addEventListener('click', async () => {
+        // Unregister service worker and delete all caches for this scope
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) await r.unregister();
+        const keys = await caches.keys();
+        for (const k of keys) await caches.delete(k);
+        location.reload();
+    });
+
     document.getElementById('gear-btn').addEventListener('click', () => {
         const open = settingsPanel.style.display !== 'none';
         settingsPanel.style.display = open ? 'none' : 'block';
