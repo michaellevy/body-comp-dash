@@ -33,20 +33,19 @@ body {
     color: #111827;
     border-bottom-color: #111827;
 }
-.tab-gear {
-    padding: 10px 16px;
-    font-size: 1.5rem;
+.settings-link {
+    display: block;
+    width: 100%;
+    background: none;
+    border: none;
+    font-family: inherit;
+    font-size: 0.9rem;
     color: #9ca3af;
+    text-align: center;
+    padding: 12px 0;
     cursor: pointer;
-    transition: color 0.15s;
-    line-height: 1;
-    min-width: 48px;
-    min-height: 48px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
 }
-.tab-gear:hover, .tab-gear.active { color: #111827; }
+.settings-link:active { color: #6b7280; }
 .tab-content { display: none; padding: 12px 0; }
 .tab-content.active { display: block; }
 

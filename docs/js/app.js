@@ -25,7 +25,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('gear-btn').addEventListener('click', () => {
         const open = settingsPanel.style.display !== 'none';
         settingsPanel.style.display = open ? 'none' : 'block';
-        document.getElementById('gear-btn').classList.toggle('active', !open);
     });
 
     document.getElementById('supa-save-btn').addEventListener('click', async () => {
@@ -45,7 +44,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             fb.textContent = `Synced ${count} rows from cloud.`;
             fb.className = 'ok';
             settingsPanel.style.display = 'none';
-            document.getElementById('gear-btn').classList.remove('active');
             refreshRecent();
         } catch (e) {
             fb.textContent = 'Sync failed: ' + e.message;
