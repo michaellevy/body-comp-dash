@@ -18,6 +18,17 @@
     <div class="tabs">
         <div class="tab active" data-target="log-tab">Log</div>
         <div class="tab" data-target="charts-tab">Charts</div>
+        <div class="tab-gear" id="gear-btn">&#9881;</div>
+    </div>
+
+    <!-- Settings (hidden by default) -->
+    <div id="settings-panel" class="card" style="display:none; padding:16px">
+        <label for="input-supa-url">Supabase URL</label>
+        <input type="url" id="input-supa-url" placeholder="https://xxx.supabase.co" class="mb">
+        <label for="input-supa-key">Supabase anon key</label>
+        <input type="text" id="input-supa-key" placeholder="eyJ..." class="mb">
+        <button id="supa-save-btn">Save &amp; Sync</button>
+        <div id="supa-feedback" style="font-size:0.85rem;margin-top:8px;min-height:1.2em"></div>
     </div>
 
     <!-- Log Tab -->

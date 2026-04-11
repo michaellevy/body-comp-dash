@@ -13,6 +13,46 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
+    // ── Settings gear ─────────────────────────────────
+    const settingsPanel = document.getElementById('settings-panel');
+    const supaUrlInput = document.getElementById('input-supa-url');
+    const supaKeyInput = document.getElementById('input-supa-key');
+
+    // Pre-fill if already configured
+    supaUrlInput.value = localStorage.getItem('supa_url') || '';
+    supaKeyInput.value = localStorage.getItem('supa_key') || '';
+
+    document.getElementById('gear-btn').addEventListener('click', () => {
+        const open = settingsPanel.style.display !== 'none';
+        settingsPanel.style.display = open ? 'none' : 'block';
+        document.getElementById('gear-btn').classList.toggle('active', !open);
+    });
+
+    document.getElementById('supa-save-btn').addEventListener('click', async () => {
+        const fb = document.getElementById('supa-feedback');
+        const url = supaUrlInput.value.trim();
+        const key = supaKeyInput.value.trim();
+        if (!url || !key) {
+            fb.textContent = 'Both fields are required.';
+            fb.className = 'err';
+            return;
+        }
+        db.setSupa(url, key);
+        fb.textContent = 'Syncing...';
+        fb.className = '';
+        try {
+            const count = await db.syncFromCloud();
+            fb.textContent = `Synced ${count} rows from cloud.`;
+            fb.className = 'ok';
+            settingsPanel.style.display = 'none';
+            document.getElementById('gear-btn').classList.remove('active');
+            refreshRecent();
+        } catch (e) {
+            fb.textContent = 'Sync failed: ' + e.message;
+            fb.className = 'err';
+        }
+    });
+
     // ── Date default ───────────────────────────────────
     const dateInput = document.getElementById('input-date');
     dateInput.value = new Date().toISOString().slice(0, 10);
