@@ -85,21 +85,30 @@ async function supaUpsert(row) {
 
 async function supaFetchAll() {
     if (!supaConfigured()) return [];
+    const PAGE = 1000;
+    let all = [];
+    let offset = 0;
     try {
-        const res = await fetch(
-            `${SUPA_URL}/rest/v1/measurements?select=date,weight,fat_percent&order=date`,
-            {
-                headers: {
-                    'apikey': SUPA_KEY,
-                    'Authorization': `Bearer ${SUPA_KEY}`,
-                },
-            }
-        );
-        if (!res.ok) throw new Error(res.statusText);
-        return await res.json();
+        while (true) {
+            const res = await fetch(
+                `${SUPA_URL}/rest/v1/measurements?select=date,weight,fat_percent&order=date&limit=${PAGE}&offset=${offset}`,
+                {
+                    headers: {
+                        'apikey': SUPA_KEY,
+                        'Authorization': `Bearer ${SUPA_KEY}`,
+                    },
+                }
+            );
+            if (!res.ok) throw new Error(res.statusText);
+            const rows = await res.json();
+            all = all.concat(rows);
+            if (rows.length < PAGE) break;
+            offset += PAGE;
+        }
+        return all;
     } catch (e) {
         console.warn('Supabase fetch failed:', e.message);
-        return [];
+        return all; // return whatever we got
     }
 }
 
