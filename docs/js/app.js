@@ -15,12 +15,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // ── Settings gear ─────────────────────────────────
     const settingsPanel = document.getElementById('settings-panel');
-    const supaUrlInput = document.getElementById('input-supa-url');
-    const supaKeyInput = document.getElementById('input-supa-key');
+    const ghTokenInput = document.getElementById('input-gh-token');
+    const ghGistInput = document.getElementById('input-gh-gist');
 
     // Pre-fill if already configured
-    supaUrlInput.value = localStorage.getItem('supa_url') || '';
-    supaKeyInput.value = localStorage.getItem('supa_key') || '';
+    ghTokenInput.value = localStorage.getItem('gh_token') || '';
+    ghGistInput.value = localStorage.getItem('gh_gist_id') || '';
 
     document.getElementById('clear-cache-btn').addEventListener('click', async () => {
         // Unregister service worker and delete all caches for this scope
@@ -36,23 +36,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         settingsPanel.style.display = open ? 'none' : 'block';
     });
 
-    document.getElementById('supa-save-btn').addEventListener('click', async () => {
-        const fb = document.getElementById('supa-feedback');
-        const url = supaUrlInput.value.trim();
-        const key = supaKeyInput.value.trim();
-        if (!url || !key) {
+    document.getElementById('gh-save-btn').addEventListener('click', async () => {
+        const fb = document.getElementById('gh-feedback');
+        const token = ghTokenInput.value.trim();
+        const gistId = ghGistInput.value.trim();
+        if (!token || !gistId) {
             fb.textContent = 'Both fields are required.';
             fb.className = 'err';
             return;
         }
-        db.setSupa(url, key);
+        db.setGist(token, gistId);
         fb.textContent = 'Syncing...';
         fb.className = '';
         try {
-            const count = await db.syncFromCloud();
-            fb.textContent = `Synced ${count} rows from cloud.`;
+            const pulled = await db.syncFromCloud();
+            const total = await db.syncToCloud();
+            fb.textContent = `Pulled ${pulled} from gist, pushed ${total} back.`;
             fb.className = 'ok';
-            settingsPanel.style.display = 'none';
             refreshRecent();
         } catch (e) {
             fb.textContent = 'Sync failed: ' + e.message;
@@ -159,8 +159,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // ── Init ───────────────────────────────────────────
     // Auto-sync from cloud on load
-    if (db.supaConfigured()) {
-        db.syncFromCloud().then(() => refreshRecent());
+    if (db.gistConfigured()) {
+        db.syncFromCloud().then(() => refreshRecent()).catch(e => console.warn('Auto-sync failed:', e.message));
     }
 
     // Set slider range based on data

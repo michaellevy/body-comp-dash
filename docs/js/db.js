@@ -1,22 +1,23 @@
-// IndexedDB local store + Supabase cloud backup
+// IndexedDB local store + GitHub Gist cloud backup
 
 const DB_NAME = 'bodycomp';
 const DB_VERSION = 1;
 const STORE = 'measurements';
+const GIST_FILE = 'bodycomp.json';
 
-// ── Supabase config (set via settings) ─────────────────
-let SUPA_URL = localStorage.getItem('supa_url') || '';
-let SUPA_KEY = localStorage.getItem('supa_key') || '';
+// ── Gist config (set via settings) ─────────────────────
+let GH_TOKEN = localStorage.getItem('gh_token') || '';
+let GH_GIST_ID = localStorage.getItem('gh_gist_id') || '';
 
-function supaConfigured() {
-    return SUPA_URL && SUPA_KEY;
+function gistConfigured() {
+    return GH_TOKEN && GH_GIST_ID;
 }
 
-function setSupa(url, key) {
-    SUPA_URL = url;
-    SUPA_KEY = key;
-    localStorage.setItem('supa_url', url);
-    localStorage.setItem('supa_key', key);
+function setGist(token, gistId) {
+    GH_TOKEN = token;
+    GH_GIST_ID = gistId;
+    localStorage.setItem('gh_token', token);
+    localStorage.setItem('gh_gist_id', gistId);
 }
 
 // ── IndexedDB ──────────────────────────────────────────
@@ -60,56 +61,47 @@ async function localGetRecent(n) {
     return all.slice(-n);
 }
 
-// ── Supabase sync ──────────────────────────────────────
-async function supaUpsert(row) {
-    if (!supaConfigured()) return;
-    try {
-        await fetch(`${SUPA_URL}/rest/v1/measurements`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'apikey': SUPA_KEY,
-                'Authorization': `Bearer ${SUPA_KEY}`,
-                'Prefer': 'resolution=merge-duplicates',
-            },
-            body: JSON.stringify({
-                date: row.date,
-                weight: row.weight,
-                fat_percent: row.fat_percent,
-            }),
-        });
-    } catch (e) {
-        console.warn('Supabase upsert failed (will retry on next sync):', e.message);
-    }
+// ── GitHub Gist sync ───────────────────────────────────
+// Whole-file overwrite: each push writes the full local snapshot to one
+// file in one gist; each pull reads that file and merges into local (cloud
+// wins on date collision). Concurrent multi-device writes are not handled
+// — last-writer-wins is acceptable for a single user with infrequent entry.
+
+async function gistFetch() {
+    if (!gistConfigured()) return [];
+    const res = await fetch(`https://api.github.com/gists/${GH_GIST_ID}`, {
+        headers: {
+            'Accept': 'application/vnd.github+json',
+            'Authorization': `Bearer ${GH_TOKEN}`,
+        },
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const gist = await res.json();
+    const file = gist.files[GIST_FILE];
+    if (!file) return [];
+    const text = file.truncated
+        ? await (await fetch(file.raw_url)).text()
+        : file.content;
+    if (!text || !text.trim()) return [];
+    return JSON.parse(text);
 }
 
-async function supaFetchAll() {
-    if (!supaConfigured()) return [];
-    const PAGE = 1000;
-    let all = [];
-    let offset = 0;
-    try {
-        while (true) {
-            const res = await fetch(
-                `${SUPA_URL}/rest/v1/measurements?select=date,weight,fat_percent&order=date&limit=${PAGE}&offset=${offset}`,
-                {
-                    headers: {
-                        'apikey': SUPA_KEY,
-                        'Authorization': `Bearer ${SUPA_KEY}`,
-                    },
-                }
-            );
-            if (!res.ok) throw new Error(res.statusText);
-            const rows = await res.json();
-            all = all.concat(rows);
-            if (rows.length < PAGE) break;
-            offset += PAGE;
-        }
-        return all;
-    } catch (e) {
-        console.warn('Supabase fetch failed:', e.message);
-        return all; // return whatever we got
-    }
+async function gistPush() {
+    if (!gistConfigured()) return;
+    const all = await localGetAll();
+    const body = {
+        files: { [GIST_FILE]: { content: JSON.stringify(all, null, 2) } },
+    };
+    const res = await fetch(`https://api.github.com/gists/${GH_GIST_ID}`, {
+        method: 'PATCH',
+        headers: {
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${GH_TOKEN}`,
+        },
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
 }
 
 // ── Public API ─────────────────────────────────────────
@@ -120,7 +112,7 @@ async function saveMeasurement(dateStr, weight, fatPercent) {
         fat_percent: fatPercent != null && fatPercent !== '' ? parseFloat(fatPercent) : null,
     };
     await localPut(row);
-    supaUpsert(row); // fire-and-forget
+    gistPush().catch(e => console.warn('Gist push failed (will retry on next save):', e.message));
 }
 
 async function getAllMeasurements() {
@@ -132,9 +124,8 @@ async function getRecentMeasurements(n) {
 }
 
 async function syncFromCloud() {
-    // Pull all cloud data into local DB (cloud wins on conflict)
-    if (!supaConfigured()) return 0;
-    const cloud = await supaFetchAll();
+    if (!gistConfigured()) return 0;
+    const cloud = await gistFetch();
     let count = 0;
     for (const row of cloud) {
         await localPut(row);
@@ -144,36 +135,13 @@ async function syncFromCloud() {
 }
 
 async function syncToCloud() {
-    // Push all local data to cloud in batches
-    if (!supaConfigured()) return 0;
-    const local = await localGetAll();
-    const BATCH = 100;
-    let count = 0;
-    for (let i = 0; i < local.length; i += BATCH) {
-        const chunk = local.slice(i, i + BATCH).map(r => ({
-            date: r.date, weight: r.weight, fat_percent: r.fat_percent,
-        }));
-        try {
-            const res = await fetch(`${SUPA_URL}/rest/v1/measurements`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'apikey': SUPA_KEY,
-                    'Authorization': `Bearer ${SUPA_KEY}`,
-                    'Prefer': 'resolution=merge-duplicates',
-                },
-                body: JSON.stringify(chunk),
-            });
-            if (!res.ok) throw new Error(res.statusText);
-            count += chunk.length;
-        } catch (e) {
-            console.warn(`Batch push failed at row ${i}:`, e.message);
-        }
-    }
-    return count;
+    if (!gistConfigured()) return 0;
+    await gistPush();
+    const all = await localGetAll();
+    return all.length;
 }
 
-// ── Data import ────────────────────────────────────────
+// ── Data import/export ─────────────────────────────────
 async function importJSON(jsonArray) {
     let count = 0;
     for (const row of jsonArray) {
@@ -194,5 +162,5 @@ function exportJSON(rows) {
 window.db = {
     saveMeasurement, getAllMeasurements, getRecentMeasurements,
     syncFromCloud, syncToCloud, importJSON, exportJSON,
-    supaConfigured, setSupa,
+    gistConfigured, setGist,
 };

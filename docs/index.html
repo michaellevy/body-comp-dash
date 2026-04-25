@@ -48,12 +48,18 @@
 
         <button id="gear-btn" class="settings-link">Settings</button>
         <div id="settings-panel" class="card" style="display:none; padding:16px">
-            <label for="input-supa-url">Supabase URL</label>
-            <input type="url" id="input-supa-url" placeholder="https://xxx.supabase.co" class="mb">
-            <label for="input-supa-key">Supabase anon key</label>
-            <input type="text" id="input-supa-key" placeholder="eyJ..." class="mb">
-            <button id="supa-save-btn">Save &amp; Sync</button>
-            <div id="supa-feedback" style="font-size:0.85rem;margin-top:8px;min-height:1.2em"></div>
+            <label for="input-gh-token">GitHub token</label>
+            <input type="text" id="input-gh-token" placeholder="ghp_... (classic PAT, gist scope)" class="mb" autocomplete="off">
+            <label for="input-gh-gist">Gist ID</label>
+            <input type="text" id="input-gh-gist" placeholder="32-char hex from gist URL" class="mb" autocomplete="off">
+            <button id="gh-save-btn">Save &amp; Sync</button>
+            <div id="gh-feedback" style="font-size:0.85rem;margin-top:8px;min-height:1.2em"></div>
+            <div class="muted" style="font-size:0.78rem;margin-top:10px;line-height:1.4">
+                One-time setup: create a secret gist at gist.github.com with a file
+                <code>bodycomp.json</code> containing <code>[]</code>, copy its ID from the URL.
+                Create a classic PAT at github.com/settings/tokens with the <code>gist</code> scope
+                (fine-grained PATs don't support gists).
+            </div>
             <button id="clear-cache-btn" style="margin-top:12px">Clear cache &amp; reload</button>
         </div>
     </div>

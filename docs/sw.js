@@ -1,4 +1,4 @@
-const CACHE = 'bodycomp-v8';
+const CACHE = 'bodycomp-v9';
 const ASSETS = [
     './',
     './index.html',
@@ -25,9 +25,9 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-    // Network-first for API calls, cache-first for assets
-    if (e.request.url.includes('supabase')) {
-        e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+    // Always go to network for the GitHub API; cache-first for static assets.
+    if (e.request.url.includes('api.github.com') || e.request.url.includes('gist.githubusercontent.com')) {
+        e.respondWith(fetch(e.request));
     } else {
         e.respondWith(
             caches.match(e.request).then(r => r || fetch(e.request))
