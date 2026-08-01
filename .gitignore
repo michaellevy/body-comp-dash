@@ -9,4 +9,5 @@ __pycache__/
 !docs/*.png
 *.csv
 .DS_Store
+seed-data.json
 docs/seed-data.json
