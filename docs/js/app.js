@@ -72,7 +72,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // ── Date default ───────────────────────────────────
     const dateInput = document.getElementById('input-date');
-    dateInput.value = new Date().toISOString().slice(0, 10);
+    dateInput.value = tape.todayStr();
 
     // ── Save ───────────────────────────────────────────
     document.getElementById('save-btn').addEventListener('click', async () => {
@@ -94,7 +94,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        const dt = dateInput.value || new Date().toISOString().slice(0, 10);
+        const dt = dateInput.value || tape.todayStr();
 
         const parts = [];
         if (weight) {
@@ -188,7 +188,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const months = parseInt(slider.max) - parseInt(val);
         if (months <= 0) return null; // all data
         const d = new Date(now.getFullYear(), now.getMonth() - months, 1);
-        return d.toISOString().slice(0, 10);
+        return tape.localDateStr(d);
     }
 
     function updateSliderLabel() {

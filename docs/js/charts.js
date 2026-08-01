@@ -20,45 +20,110 @@ const VIRIDIS_R = [
 const HOVERLABEL = { bgcolor: 'white', font: { size: 12, family: FONT.family } };
 const CFG = { displayModeBar: false, responsive: true };
 
-// ── Smoothing: resample daily + Gaussian rolling mean ──
+// ── Smoothing: kernel regression with density-adaptive bandwidth ──
+// Weights the ACTUAL observations on a daily output grid. The previous version
+// interpolated to daily first and smoothed that, which let a long gap between
+// readings manufacture synthetic points that pulled the average.
+//
+// The bandwidth follows how often you've been measuring. Sigma is derived from
+// the local spacing between readings, so daily weigh-ins get a tight kernel
+// that resolves a real trend in ~2 weeks, while a sparse stretch widens it so
+// the line doesn't chase individual readings. It's computed PER OUTPUT DAY, so
+// a sparse history followed by daily weighing gets a wide kernel over the old
+// data and a tight one over the recent data — not one compromise for both.
+const SIGMA_MIN = 6;     // days — daily weighing; tighter than this tracks noise
+const SIGMA_MAX = 28;    // days — very sparse; beyond this the line goes rigid
+const SIGMA_SPAN = 6;    // sigma spans about this many typical gaps
+const NEIGHBORS = 10;    // readings used to estimate local spacing
+const SIGMA_BLEND = 21;  // days — sigma is itself smoothed over this half-width
+
+// Local spacing between readings, measured directly: expand outward from t
+// until k readings are collected (they're always a contiguous run in the sorted
+// series), then take the MEDIAN gap between them. Measuring the gaps beats
+// dividing a radius by a count — no special case for the ends of the series,
+// and a single outlying gap can't drag the estimate.
+function localSpacingDays(ts, t, k) {
+    let lo = 0, hi = ts.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (ts[mid] < t) lo = mid + 1; else hi = mid; }
+
+    let i = lo - 1, j = lo, found = 0;
+    while (found < k && (i >= 0 || j < ts.length)) {
+        const dl = i >= 0 ? t - ts[i] : Infinity;
+        const dr = j < ts.length ? ts[j] - t : Infinity;
+        if (dl <= dr) i--; else j++;
+        found++;
+    }
+
+    const near = ts.slice(i + 1, j);
+    if (near.length < 2) return null;
+    const gaps = [];
+    for (let n = 1; n < near.length; n++) gaps.push((near[n] - near[n - 1]) / 86400000);
+    gaps.sort((a, b) => a - b);
+    const m = gaps.length >> 1;
+    return gaps.length % 2 ? gaps[m] : (gaps[m - 1] + gaps[m]) / 2;
+}
+
+function adaptiveSigma(ts, t) {
+    const spacing = localSpacingDays(ts, t, NEIGHBORS);
+    if (!spacing) return SIGMA_MAX;
+    return Math.min(SIGMA_MAX, Math.max(SIGMA_MIN, SIGMA_SPAN * spacing));
+}
+
+// Running mean over a series — used on the sigma track, not the data.
+function movingAverage(arr, halfWidth) {
+    return arr.map((_, i) => {
+        let sum = 0, n = 0;
+        for (let k = Math.max(0, i - halfWidth); k <= Math.min(arr.length - 1, i + halfWidth); k++) {
+            sum += arr[k]; n++;
+        }
+        return sum / n;
+    });
+}
+
+// stdDays: pass a number to pin the bandwidth; omit it to adapt to density.
 function gaussianSmooth(dates, values, windowDays, stdDays) {
-    windowDays = windowDays || 90;
-    stdDays = stdDays || 20;
     if (dates.length < 3) return { x: dates, y: values };
 
-    const ts = dates.map(d => new Date(d).getTime());
+    const pts = dates
+        .map((d, i) => ({ t: new Date(d + 'T00:00:00').getTime(), v: values[i] }))
+        .filter(p => !isNaN(p.t) && p.v != null)
+        .sort((a, b) => a.t - b.t);
+    if (pts.length < 3) return { x: dates, y: values };
+
+    const ts = pts.map(p => p.t);
     const dayMs = 86400000;
     const start = ts[0], end = ts[ts.length - 1];
     const nDays = Math.round((end - start) / dayMs) + 1;
-    const dailyX = [], dailyY = [];
 
-    let j = 0;
+    const grid = [];
+    for (let i = 0; i < nDays; i++) grid.push(start + i * dayMs);
+
+    // The median gap flips abruptly where a sparse stretch meets a dense one,
+    // which would step sigma from 28 to 6 between adjacent days and put a
+    // visible kink in the trend line. Smoothing the sigma track first makes the
+    // bandwidth ease across the transition instead of snapping.
+    const sigmas = stdDays
+        ? grid.map(() => stdDays)
+        : movingAverage(grid.map(t => adaptiveSigma(ts, t)), SIGMA_BLEND);
+
+    const x = [], y = [];
     for (let i = 0; i < nDays; i++) {
-        const t = start + i * dayMs;
-        while (j < ts.length - 1 && ts[j + 1] < t) j++;
-        if (j >= ts.length - 1) {
-            dailyX.push(new Date(t));
-            dailyY.push(values[values.length - 1]);
-        } else {
-            const frac = (t - ts[j]) / (ts[j + 1] - ts[j] || 1);
-            dailyX.push(new Date(t));
-            dailyY.push(values[j] + frac * (values[j + 1] - values[j]));
-        }
-    }
-
-    const half = Math.floor(windowDays / 2);
-    const smoothed = [];
-    for (let i = 0; i < dailyY.length; i++) {
+        const t = grid[i], sigma = sigmas[i];
+        const cutoff = sigma * 3 * dayMs;
         let wsum = 0, wval = 0;
-        for (let k = Math.max(0, i - half); k <= Math.min(dailyY.length - 1, i + half); k++) {
-            const dist = k - i;
-            const w = Math.exp(-0.5 * (dist / stdDays) ** 2);
+        for (let j = 0; j < pts.length; j++) {
+            const dist = Math.abs(pts[j].t - t);
+            if (dist > cutoff) continue;
+            const w = Math.exp(-0.5 * ((dist / dayMs) / sigma) ** 2);
             wsum += w;
-            wval += w * dailyY[k];
+            wval += w * pts[j].v;
         }
-        smoothed.push(wval / wsum);
+        if (wsum > 0) {
+            x.push(tape.localDateStr(new Date(t)));
+            y.push(wval / wsum);
+        }
     }
-    return { x: dailyX, y: smoothed };
+    return { x, y };
 }
 
 // ── 1. Weight chart ────────────────────────────────────

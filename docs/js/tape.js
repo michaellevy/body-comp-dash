@@ -24,8 +24,17 @@ const TAPE_SITES = [
 
 const DAY_MS = 86400000;
 
+// Dates are calendar days in the user's own timezone, never UTC instants.
+// toISOString() would roll over at 6pm local in MDT, filing an evening weigh-in
+// under tomorrow and making sites come due a day early.
+function localDateStr(d) {
+    const dt = d || new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
+}
+
 function todayStr() {
-    return new Date().toISOString().slice(0, 10);
+    return localDateStr();
 }
 
 function daysBetween(fromStr, toStr) {
@@ -82,4 +91,4 @@ function navySeries(tapeRows, heightIn) {
 }
 
 window.tape = { TAPE_SITES, SHARED_CUE, dueSites, lastRecorded, navyFatPercent,
-                navySeries, todayStr, daysBetween };
+                navySeries, todayStr, localDateStr, daysBetween };
