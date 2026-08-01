@@ -207,4 +207,103 @@ function renderPathChart(el, data) {
     Plotly.newPlot(el, hoverTraces, layout, CFG);
 }
 
-window.charts = { renderWeightChart, renderMuscleFatChart, renderPathChart };
+// ── 4. Circumference charts ────────────────────────────
+// One chart per site, all in absolute inches on their own axis. Each site gets
+// its own y-range, so a 0.3 in change reads clearly even though thigh sits ~8
+// inches above bicep — no shared axis to flatten anything, and no mixing of
+// absolute and relative scales across the dashboard.
+const SERIES_A = '#6A5ACD';  // slateblue
+const SERIES_B = '#1f9e89';  // teal — validated ΔE 19.6 (deutan) vs SERIES_A
+
+// dense: weekly data, worth a Gaussian trend line. Sparse monthly sites get a
+// plain connector instead — smoothing 6 points invents a curve that isn't there.
+function renderCircumferenceChart(el, tapeRows, key, label, dense) {
+    const rows = tapeRows.filter(r => r[key] != null);
+    if (!rows.length) { Plotly.purge(el); return; }
+
+    const x = rows.map(r => r.date);
+    const y = rows.map(r => r[key]);
+
+    const traces = [{
+        x, y, mode: dense ? 'markers' : 'lines+markers',
+        line: { color: SERIES_A, width: 2 },
+        marker: { size: dense ? 12 : 10, color: SERIES_A, line: { width: 2, color: 'white' } },
+        hovertemplate: `<b>%{x|%b %d, %Y}</b><br>%{y:.2f} in ${label.toLowerCase()}<extra></extra>`,
+        hoverlabel: HOVERLABEL, showlegend: false,
+    }];
+
+    if (dense && rows.length >= 3) {
+        // Tighter than the weight smoother: waist is weekly and low-noise, so a
+        // 90/20 kernel would flatten exactly the change we're looking for.
+        const sm = gaussianSmooth(x, y, 60, 14);
+        traces.push({
+            x: sm.x, y: sm.y, mode: 'lines',
+            line: { color: 'black', width: 2 },
+            hoverinfo: 'skip', showlegend: false,
+        });
+    }
+
+    const layout = {
+        ...BASE_LAYOUT, height: 250, showlegend: false,
+        margin: { l: 48, r: 16, t: 22, b: 28 },
+        annotations: [
+            { text: `${label} (inches)`, xref: 'paper', yref: 'paper', x: 0.5, y: 1,
+              showarrow: false, font: { size: 12, color: '#6b7280' },
+              xanchor: 'center', yanchor: 'bottom' },
+        ],
+    };
+
+    Plotly.newPlot(el, traces, layout, CFG);
+}
+
+// ── 5. Navy vs BIA chart ───────────────────────────────
+// The drift check: the calibrated BIA curve rests on 3 gold-standard anchors and
+// extrapolates linearly past the heaviest one. The Navy estimate is biased high
+// for lean muscular builds, so the two lines are NOT expected to coincide —
+// what matters is whether the gap between them stays constant. A widening gap
+// means the BIA extrapolation is going off.
+function renderNavyChart(el, navyRows, calibrated) {
+    if (!navyRows.length) { Plotly.purge(el); return; }
+
+    const bia = calibrated.filter(r => r.fat_percent_cal != null);
+    const smNavy = gaussianSmooth(navyRows.map(r => r.date),
+                                  navyRows.map(r => r.fat_percent), 60, 14);
+
+    const traces = [
+        {
+            x: navyRows.map(r => r.date), y: navyRows.map(r => r.fat_percent),
+            mode: 'markers', name: 'Navy (tape)',
+            marker: { size: 10, color: SERIES_B, line: { width: 2, color: 'white' } },
+            hovertemplate: '<b>%{x|%b %d, %Y}</b><br>%{y:.1f}% (tape)<extra></extra>',
+            hoverlabel: HOVERLABEL,
+        },
+        {
+            x: smNavy.x, y: smNavy.y, mode: 'lines', showlegend: false,
+            line: { color: SERIES_B, width: 2 }, hoverinfo: 'skip',
+        },
+    ];
+
+    if (bia.length) {
+        const sm = gaussianSmooth(bia.map(r => r.date), bia.map(r => r.fat_percent_cal));
+        traces.push({
+            x: sm.x, y: sm.y, mode: 'lines', name: 'Calibrated scale',
+            line: { color: SERIES_A, width: 2 },
+            hovertemplate: '<b>%{x|%b %d, %Y}</b><br>%{y:.1f}% (scale)<extra></extra>',
+            hoverlabel: HOVERLABEL,
+        });
+    }
+
+    const layout = {
+        ...BASE_LAYOUT, height: 320,
+        showlegend: true,
+        legend: { orientation: 'h', x: 0.5, xanchor: 'center', y: 1.02, yanchor: 'bottom',
+                  font: { size: 11 } },
+        margin: { l: 48, r: 16, t: 34, b: 28 },
+        yaxis: { ...BASE_LAYOUT.yaxis, title: { text: '% fat', font: { size: 11 } } },
+    };
+
+    Plotly.newPlot(el, traces, layout, CFG);
+}
+
+window.charts = { renderWeightChart, renderMuscleFatChart, renderPathChart,
+                  renderCircumferenceChart, renderNavyChart };

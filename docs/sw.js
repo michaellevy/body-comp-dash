@@ -1,9 +1,10 @@
-const CACHE = 'bodycomp-v9';
+const CACHE = 'bodycomp-v11';
 const ASSETS = [
     './',
     './index.html',
     './css/style.css',
     './js/db.js',
+    './js/tape.js',
     './js/calibration.js',
     './js/charts.js',
     './js/app.js',

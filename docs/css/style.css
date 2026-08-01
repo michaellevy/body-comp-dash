@@ -139,6 +139,39 @@ button#save-btn:active { background: #e5e7eb; }
 .ok { color: #059669; }
 .err { color: #b45309; }
 
+/* ── Circumference prompts ────────────────────────────── */
+/* These fields render only when a site is ready to be measured, so their mere
+   presence is the cue — nothing here should read as an alert. */
+.tape-block {
+    margin: 4px 0 14px;
+    padding-top: 14px;
+    border-top: 1px solid #f0f0f0;
+}
+.tape-block-header {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #6b7280;
+    margin-bottom: 4px;
+}
+.tape-shared-cue {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.4;
+    margin-bottom: 14px;
+}
+.tape-field { margin-bottom: 16px; }
+.tape-cue {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.4;
+    margin: -2px 0 6px;
+}
+.tape-last {
+    font-size: 0.72rem;
+    color: #9ca3af;
+    margin-top: 5px;
+}
+
 /* ── Recent entries ───────────────────────────────────── */
 .recent-header {
     font-size: 0.9rem;
