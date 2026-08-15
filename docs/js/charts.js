@@ -293,7 +293,9 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
         x, y, mode: dense ? 'markers' : 'lines+markers',
         line: { color: SERIES_A, width: 2 },
         marker: { size: dense ? 12 : 10, color: SERIES_A, line: { width: 2, color: 'white' } },
-        hovertemplate: `<b>%{x|%b %d, %Y}</b><br>%{y:.2f} in ${label.toLowerCase()}<extra></extra>`,
+        // ~f trims trailing zeros, so an eighth-inch reading (36.625) survives
+        // intact while a round 37 doesn't render as 37.000.
+        hovertemplate: `<b>%{x|%b %d, %Y}</b><br>%{y:.3~f} in ${label.toLowerCase()}<extra></extra>`,
         hoverlabel: HOVERLABEL, showlegend: false,
     }];
 

@@ -113,6 +113,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         document.getElementById('input-weight').value = '';
         document.getElementById('input-fat').value = '';
+        showResting = false;
         await refreshTapeDue();
 
         // Switch to Charts tab
@@ -123,43 +124,75 @@ document.addEventListener('DOMContentLoaded', async () => {
         refreshCharts();
     });
 
-    // ── Due circumference prompts ──────────────────────
-    // Fields appear only when a site is due and stay until it's recorded.
-    // Dueness is recomputed from stored data every render, so there's nothing
-    // to dismiss and nothing that can be lost by reloading.
-    async function refreshTapeDue() {
-        const el = document.getElementById('tape-due');
-        const rows = await db.getAllTape();
-        const due = tape.dueSites(rows);
+    // ── Circumference prompts ──────────────────────────
+    // Due sites render on their own and stay until actually recorded. Dueness
+    // is recomputed from stored data every render, so there's nothing to
+    // dismiss and nothing that can be lost by reloading. Sites that aren't due
+    // are one button away — the cadences are a floor on useful signal, not a
+    // lock, so an off-schedule reading should never be impossible to enter.
+    let showResting = false;
 
-        if (!due.length) {
-            el.innerHTML = '';
-            return;
+    // A tape is read in eighths, so a reading can carry three decimals
+    // (36 5/8 → 36.625). Trim trailing zeros rather than fixing the width:
+    // rounding to 0.1 would throw away a real eighth of an inch.
+    function fmtIn(v) {
+        return parseFloat(v.toFixed(3)).toString();
+    }
+
+    function tapeField(site, rows, today, dueIn) {
+        const last = tape.lastRecorded(rows, site.key);
+        const bits = [];
+        if (last) {
+            bits.push(`Last time: ${fmtIn(last[site.key])} in · ${tape.daysBetween(last.date, today)} days ago`);
         }
-
-        const today = tape.todayStr();
+        if (dueIn > 0) bits.push(`next due in ${dueIn} ${dueIn === 1 ? 'day' : 'days'}`);
+        const ref = bits.length ? `<div class="tape-last">${bits.join(' · ')}</div>` : '';
 
         // Full width, one site per row: the cue is the point, and it has to be
         // readable without wrapping into a narrow column.
-        const fields = due.map(site => {
-            const last = tape.lastRecorded(rows, site.key);
-            const ref = last
-                ? `<div class="tape-last">Last time: ${last[site.key].toFixed(1)} in · ${tape.daysBetween(last.date, today)} days ago</div>`
-                : '';
-            return `<div class="tape-field">
-                <label for="input-tape-${site.key}">${site.label} (in)</label>
-                <div class="tape-cue">${site.cue}</div>
-                <input type="number" id="input-tape-${site.key}" class="tape-input"
-                       step="0.1" inputmode="decimal" data-site="${site.key}">
-                ${ref}
-            </div>`;
-        });
-
-        el.innerHTML = `<div class="tape-block">
-            <div class="tape-block-header">Tape measure</div>
-            <div class="tape-shared-cue">${tape.SHARED_CUE}</div>
-            ${fields.join('')}
+        return `<div class="tape-field">
+            <label for="input-tape-${site.key}">${site.label} (in)</label>
+            <div class="tape-cue">${site.cue}</div>
+            <input type="number" id="input-tape-${site.key}" class="tape-input"
+                   step="any" inputmode="decimal" data-site="${site.key}">
+            ${ref}
         </div>`;
+    }
+
+    async function refreshTapeDue() {
+        const el = document.getElementById('tape-due');
+        const rows = await db.getAllTape();
+        const today = tape.todayStr();
+        const due = tape.dueSites(rows);
+        const resting = tape.restingSites(rows);
+
+        // Nothing is on offer only if every site is showing already.
+        const showToggle = resting.length > 0;
+        const visible = showResting ? due.concat(resting) : due;
+
+        const parts = [`<div class="tape-block-header">Tape measure</div>`];
+        if (visible.length) {
+            parts.push(`<div class="tape-shared-cue">${tape.SHARED_CUE}</div>`);
+            parts.push(...visible.map(site =>
+                tapeField(site, rows, today, tape.daysUntilDue(rows, site, today))));
+        } else {
+            parts.push(`<div class="tape-shared-cue">Nothing due today.</div>`);
+        }
+        if (showToggle) {
+            parts.push(`<button type="button" id="tape-more-btn" class="tape-more">${
+                showResting ? 'Hide off-schedule sites' : 'Measure something else'
+            }</button>`);
+        }
+
+        el.innerHTML = `<div class="tape-block">${parts.join('')}</div>`;
+
+        const moreBtn = document.getElementById('tape-more-btn');
+        if (moreBtn) {
+            moreBtn.addEventListener('click', () => {
+                showResting = !showResting;
+                refreshTapeDue();
+            });
+        }
     }
 
     // ── Recent entries ─────────────────────────────────
@@ -255,12 +288,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // ── Init ───────────────────────────────────────────
-    // Auto-sync from cloud on load
-    if (db.gistConfigured()) {
-        db.syncFromCloud()
-            .then(() => { refreshRecent(); refreshTapeDue(); })
-            .catch(e => console.warn('Auto-sync failed:', e.message));
-    }
+    // Auto-sync from cloud on load, then repair. Order matters: the pull can
+    // bring back rows a data fix is meant to remove, so fixing first would be
+    // undone on every launch.
+    (async () => {
+        if (db.gistConfigured()) {
+            try {
+                await db.syncFromCloud();
+            } catch (e) {
+                console.warn('Auto-sync failed:', e.message);
+            }
+        }
+        await db.applyDataFixes();
+        refreshRecent();
+        refreshTapeDue();
+    })();
 
     // Set slider range based on data
     const all = await db.getAllMeasurements();

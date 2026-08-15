@@ -189,6 +189,58 @@ async function saveTape(dateStr, values) {
     return true;
 }
 
+// ── One-time data fix: waist series restarts on morning readings ───────────
+// The first two waist readings were taken in the evening. Waist girth swings
+// more over a single day — meals, hydration, posture — than it moves in a week
+// of real change, so mixing an evening reading into a morning series records a
+// step that isn't there. Drop them and restart from the first morning value.
+//
+// The scrub runs on every load rather than once: another device still holding
+// the old rows can push them back to the gist, and re-running is free when
+// there's nothing to remove. The seed insert is guarded, since it's a real
+// write that shouldn't reappear if the row is ever removed on purpose.
+const MORNING_CUTOFF = '2026-08-14';
+const FIRST_MORNING_WAIST = { date: '2026-08-14', waist: 36.625 };
+const SEED_FLAG = 'fix_waist_morning_seeded';
+
+async function stripField(dates, field) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(TAPE_STORE, 'readwrite');
+        const store = tx.objectStore(TAPE_STORE);
+        for (const date of dates) {
+            const getReq = store.get(date);
+            getReq.onsuccess = () => {
+                const row = getReq.result;
+                if (!row) return;
+                delete row[field];
+                // A row holding only a date is an empty record, not a measurement.
+                if (Object.keys(row).length <= 1) store.delete(date);
+                else store.put(row);
+            };
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function applyDataFixes() {
+    const rows = await localGetAll(TAPE_STORE);
+    const stale = rows.filter(r => r.date < MORNING_CUTOFF && r.waist != null);
+    const seed = !localStorage.getItem(SEED_FLAG)
+        && !rows.some(r => r.date === FIRST_MORNING_WAIST.date && r.waist != null);
+
+    if (stale.length) await stripField(stale.map(r => r.date), 'waist');
+    if (seed) {
+        await localMerge({ ...FIRST_MORNING_WAIST }, TAPE_STORE);
+        localStorage.setItem(SEED_FLAG, '1');
+    }
+    if (!stale.length && !seed) return 0;
+
+    gistPush().catch(e => console.warn('Gist push failed (will retry on next save):', e.message));
+    return stale.length + (seed ? 1 : 0);
+}
+
 async function getAllMeasurements() {
     return await localGetAll();
 }
@@ -244,6 +296,6 @@ function exportJSON(rows) {
 
 window.db = {
     saveMeasurement, saveTape, getAllMeasurements, getAllTape, getRecentMeasurements,
-    syncFromCloud, syncToCloud, importJSON, exportJSON,
+    syncFromCloud, syncToCloud, importJSON, exportJSON, applyDataFixes,
     gistConfigured, setGist, getHeight, setHeight,
 };

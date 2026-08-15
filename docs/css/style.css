@@ -171,6 +171,22 @@ button#save-btn:active { background: #e5e7eb; }
     color: #9ca3af;
     margin-top: 5px;
 }
+/* Deliberately quieter than Save: reaching for an off-schedule site is the
+   exception, and it shouldn't compete with the prompted fields above it. */
+.tape-more {
+    display: block;
+    width: 100%;
+    background: none;
+    border: 1px dashed #e5e7eb;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 0.85rem;
+    color: #6b7280;
+    padding: 10px 0;
+    margin-bottom: 14px;
+    cursor: pointer;
+}
+.tape-more:active { background: #f9fafb; }
 
 /* ── Recent entries ───────────────────────────────────── */
 .recent-header {

@@ -9,7 +9,10 @@
 // Cues are deliberately specific — a named landmark and a fixed side. Vague
 // instructions ("mid-thigh") are the main source of tape error, and error at
 // these sites is already close to the size of the signal.
-const SHARED_CUE = 'Same time of day, before eating. Tape snug but not compressing the skin.';
+// Time of day is not a detail here: waist swings more across a single day than
+// it moves in a week of real change, so a reading taken at a different hour
+// isn't comparable to the rest of the series. Morning, with the weigh-in.
+const SHARED_CUE = 'Morning, right after the weigh-in and before eating. Tape snug but not compressing the skin.';
 
 const TAPE_SITES = [
     { key: 'waist', label: 'Waist', intervalDays: 7,
@@ -49,16 +52,25 @@ function lastRecorded(rows, key) {
     return null;
 }
 
+// Days until a site comes due; <= 0 means due now, and never-measured is due.
+function daysUntilDue(tapeRows, site, asOf) {
+    const last = lastRecorded(tapeRows, site.key);
+    if (!last) return 0;
+    return site.intervalDays - daysBetween(last.date, asOf || todayStr());
+}
+
 // Which sites are due as of `asOf`. A site stays due until it's actually
 // recorded — dueness is derived from the last recorded date, never from a
 // dismissable flag, so the prompt can't be lost by reloading or ignoring it.
 function dueSites(tapeRows, asOf) {
-    asOf = asOf || todayStr();
-    return TAPE_SITES.filter(site => {
-        const last = lastRecorded(tapeRows, site.key);
-        if (!last) return true;
-        return daysBetween(last.date, asOf) >= site.intervalDays;
-    });
+    return TAPE_SITES.filter(site => daysUntilDue(tapeRows, site, asOf) <= 0);
+}
+
+// The complement — sites measured recently enough that they aren't prompted
+// for. They're still reachable on demand: the cadences are a floor on useful
+// signal, not a lock, and an extra reading is never worse than no reading.
+function restingSites(tapeRows, asOf) {
+    return TAPE_SITES.filter(site => daysUntilDue(tapeRows, site, asOf) > 0);
 }
 
 // ── Navy body fat estimate (male formula, inches) ─────────────────────────────
@@ -90,5 +102,6 @@ function navySeries(tapeRows, heightIn) {
     return out;
 }
 
-window.tape = { TAPE_SITES, SHARED_CUE, dueSites, lastRecorded, navyFatPercent,
-                navySeries, todayStr, localDateStr, daysBetween };
+window.tape = { TAPE_SITES, SHARED_CUE, dueSites, restingSites, daysUntilDue,
+                lastRecorded, navyFatPercent, navySeries, todayStr, localDateStr,
+                daysBetween };
