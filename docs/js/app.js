@@ -248,6 +248,147 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById(chartId).closest('.card').style.display = visible ? '' : 'none';
     }
 
+    // ── Linked date range ──────────────────────────────
+    // Every chart with a date x-axis shows the same window. The slider sets the
+    // coarse window; zooming or panning inside ANY one of them re-broadcasts the
+    // new range to the rest, so the dashboard never shows two different spans
+    // side by side. The path chart has no date axis, so it can't be relayed to —
+    // it follows by re-rendering from the data inside the window instead.
+    const TIME_CHARTS = ['weight-chart', 'muscle-fat-chart', 'waist-chart',
+                         'bicep-chart', 'thigh-chart', 'neck-chart', 'navy-chart'];
+
+    let chartData = { cal: [], tape: [], navy: [] };  // slider-filtered, for the shared window
+    let linkedRange = null;        // the window every chart is currently showing
+    let broadcasting = false;      // suppresses the echo from our own relayouts
+
+    // A chart div only counts once it has been plotted and its card is visible —
+    // relayout on a purged or hidden div is either an error or invisible work.
+    function liveCharts() {
+        return TIME_CHARTS.filter(id => {
+            const gd = document.getElementById(id);
+            return gd && gd.data && gd.closest('.card').style.display !== 'none';
+        });
+    }
+
+    // Plotly reports the axis that was actually dragged, which on the muscle/fat
+    // pair is xaxis2 as often as xaxis — hence the digit in the patterns. A
+    // double-click reports autorange instead of a range.
+    function xRangeFromEvent(ev) {
+        const keys = Object.keys(ev);
+        if (keys.some(k => /^xaxis\d*\.autorange$/.test(k) && ev[k] === true)) return { range: null };
+        const k0 = keys.find(k => /^xaxis\d*\.range\[0\]$/.test(k));
+        if (k0) return { range: [ev[k0], ev[k0.replace('[0]', '[1]')]] };
+        const kr = keys.find(k => /^xaxis\d*\.range$/.test(k));
+        if (kr) return { range: ev[kr].slice() };
+        return null;  // resize, y-zoom, legend click — nothing to sync
+    }
+
+    // Plotly hands back date-axis bounds as "2026-03-14 08:12:33.9". Safari
+    // rejects the space form, so normalize before parsing — and pin the result to
+    // UTC, which is how Plotly reads a bare "YYYY-MM-DD" in the data itself.
+    // Parsing one end local and the other UTC would skew every comparison here by
+    // the timezone offset.
+    function toMs(v) {
+        if (v == null) return null;
+        if (typeof v === 'number') return v;
+        let s = String(v).trim().replace(' ', 'T');
+        if (!/(Z|[+-]\d\d:?\d\d)$/.test(s)) s += 'Z';
+        const t = new Date(s).getTime();
+        return isNaN(t) ? null : t;
+    }
+
+    function sameRange(a, b) {
+        if (!a || !b) return a === b;
+        return toMs(a[0]) === toMs(b[0]) && toMs(a[1]) === toMs(b[1]);
+    }
+
+    function withinRange(rows, range) {
+        if (!range) return rows;
+        const lo = toMs(range[0]), hi = toMs(range[1]);
+        if (lo == null || hi == null) return rows;
+        return rows.filter(r => {
+            const t = toMs(r.date);
+            return t >= lo && t <= hi;
+        });
+    }
+
+    // The window every chart resets to. Autorange can't serve as the shared
+    // "everything" view because each chart would size to its OWN series — weight
+    // stops at the last weigh-in, the tape sites run on to the last measuring
+    // day — and a double-click would pull the dashboard back out of alignment.
+    // So the reset target is the span of all the data on the page at once.
+    function windowRange() {
+        let lo = Infinity, hi = -Infinity;
+        [chartData.cal, chartData.tape, chartData.navy].forEach(rows => {
+            (rows || []).forEach(r => {
+                const t = toMs(r.date);
+                if (t == null) return;
+                if (t < lo) lo = t;
+                if (t > hi) hi = t;
+            });
+        });
+        if (!isFinite(lo) || hi <= lo) return null;
+        const pad = Math.max((hi - lo) * 0.03, 86400000);
+        return [lo - pad, hi + pad];
+    }
+
+    // The path chart aggregates to quarters, so a window holding one quarter has
+    // no arrow to draw — hide the card rather than show an empty box.
+    function renderPath(range) {
+        const rows = withinRange(chartData.cal, range);
+        const quarters = new Set(rows
+            .filter(r => r.fat_lbs != null && r.muscle_lbs != null)
+            .map(r => { const d = new Date(r.date); return `${d.getFullYear()}-${d.getMonth() / 3 | 0}`; }));
+        charts.renderPathChart('path-chart', rows);
+        showCard('path-chart', quarters.size >= 2);
+    }
+
+    // Every chart — and our own record of the window — gets its OWN copy of the
+    // bounds array. Plotly keeps whatever array it's handed as the axis range and
+    // rewrites it in place on the next drag, so a shared array would let one
+    // chart's zoom silently redefine what the others think they're showing, and
+    // would leave linkedRange always equal to the range that just arrived.
+    function broadcastRange(range, sourceId) {
+        const target = range ? range.slice() : null;
+        linkedRange = target;
+        broadcasting = true;
+        liveCharts().forEach(id => {
+            if (id === sourceId) return;
+            // The matched second axis on the muscle/fat chart follows xaxis on
+            // its own, so one key covers both subplots.
+            Plotly.relayout(document.getElementById(id), target
+                ? { 'xaxis.range': target.slice(), 'xaxis.autorange': false }
+                : { 'xaxis.autorange': true });
+        });
+        renderPath(target);
+        // Plotly may emit the resulting relayout after its redraw settles, so
+        // hold the guard past the current task rather than clearing it inline.
+        setTimeout(() => { broadcasting = false; }, 0);
+    }
+
+    // newPlot re-initializes the div, so handlers are re-bound after every
+    // render; removeAllListeners keeps that from stacking duplicates.
+    function wireRangeLinking() {
+        liveCharts().forEach(id => {
+            const gd = document.getElementById(id);
+            gd.removeAllListeners('plotly_relayout');
+            gd.on('plotly_relayout', ev => {
+                if (broadcasting) return;
+                const got = xRangeFromEvent(ev);
+                if (!got) return;
+                if (got.range) {
+                    if (sameRange(got.range, linkedRange)) return;
+                    broadcastRange(got.range, id);
+                } else {
+                    // Double-click reset. The source has already autoranged to its
+                    // own extent, so it needs the shared window pushed to it too —
+                    // no sourceId, everybody gets the update.
+                    broadcastRange(windowRange(), null);
+                }
+            });
+        });
+    }
+
     async function refreshCharts() {
         allData = await db.getAllMeasurements();
         const tapeRows = await db.getAllTape();
@@ -267,9 +408,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         const navyAll = tape.navySeries(tapeRows, db.getHeight());
         const navyRows = since ? navyAll.filter(r => r.date >= since) : navyAll;
 
+        // The slider is the master control: moving it drops any zoom the charts
+        // were holding, so they all come back on the new window together.
+        chartData = { cal, tape: filteredTape, navy: navyRows };
+        linkedRange = null;
+
         charts.renderWeightChart('weight-chart', cal);
         charts.renderMuscleFatChart('muscle-fat-chart', cal);
-        charts.renderPathChart('path-chart', cal);
+        renderPath(null);
 
         // Waist is weekly, so it earns a smoothed trend; the monthly sites are
         // too sparse for smoothing and get a plain connector.
@@ -285,6 +431,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         charts.renderNavyChart('navy-chart', navyRows, cal);
         showCard('navy-chart', navyRows.length > 0);
+
+        wireRangeLinking();
+        // Start every chart on the shared window rather than on its own autorange,
+        // so they line up before the first zoom, not just after one.
+        const full = windowRange();
+        if (full) broadcastRange(full, null);
     }
 
     // ── Init ───────────────────────────────────────────

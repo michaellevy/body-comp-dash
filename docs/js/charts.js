@@ -1,15 +1,24 @@
 // Chart builders using Plotly.js — ported from charts.py
 
 const FONT = { family: 'Inter, -apple-system, sans-serif', color: '#1f2937', size: 12 };
-const BASE_LAYOUT = {
-    template: 'plotly_white',
-    paper_bgcolor: 'white', plot_bgcolor: 'white',
-    font: FONT,
-    xaxis: { showgrid: false, zeroline: false, linecolor: '#e5e7eb', linewidth: 1 },
-    yaxis: { showgrid: false, zeroline: false, linecolor: '#e5e7eb', linewidth: 1 },
-    margin: { l: 48, r: 16, t: 8, b: 28 },
-    showlegend: false,
-};
+const AXIS = { showgrid: false, zeroline: false, linecolor: '#e5e7eb', linewidth: 1 };
+
+// A factory, not a shared constant. Plotly writes state back into the layout
+// object it's handed — a zoom lands as `range`/`autorange` on the axis object
+// itself — so a shallow `{...BASE_LAYOUT}` would have every chart sharing one
+// xaxis, and a date range set on the weight chart would turn up on the path
+// chart's muscle axis. Each call gets its own axes.
+function baseLayout() {
+    return {
+        template: 'plotly_white',
+        paper_bgcolor: 'white', plot_bgcolor: 'white',
+        font: FONT,
+        xaxis: { ...AXIS },
+        yaxis: { ...AXIS },
+        margin: { l: 48, r: 16, t: 8, b: 28 },
+        showlegend: false,
+    };
+}
 // Reversed Viridis — darker (purple) = higher fat%
 const VIRIDIS_R = [
     [0, '#fde725'], [0.1, '#b5de2b'], [0.2, '#6ece58'],
@@ -161,7 +170,7 @@ function renderWeightChart(el, data) {
         },
     ];
 
-    Plotly.newPlot(el, traces, { ...BASE_LAYOUT, height: 300 }, CFG);
+    Plotly.newPlot(el, traces, { ...baseLayout(), height: 300 }, CFG);
 }
 
 // ── 2. Muscle & Fat chart ──────────────────────────────
@@ -195,13 +204,13 @@ function renderMuscleFatChart(el, data) {
     };
 
     const layout = {
-        ...BASE_LAYOUT, height: 600, showlegend: false,
+        ...baseLayout(), height: 600, showlegend: false,
         margin: { l: 48, r: 16, t: 20, b: 28 },
         grid: { rows: 2, columns: 1, subplots: [['xy'], ['x2y2']], roworder: 'top to bottom' },
-        xaxis: { ...BASE_LAYOUT.xaxis },
-        yaxis: { ...BASE_LAYOUT.yaxis, range: pad(muscle), title: { text: 'pounds', font: { size: 11 } } },
-        xaxis2: { ...BASE_LAYOUT.xaxis, matches: 'x' },
-        yaxis2: { ...BASE_LAYOUT.yaxis, range: pad(fat), title: { text: 'pounds', font: { size: 11 } } },
+        xaxis: { ...AXIS },
+        yaxis: { ...AXIS, range: pad(muscle), title: { text: 'pounds', font: { size: 11 } } },
+        xaxis2: { ...AXIS, matches: 'x' },
+        yaxis2: { ...AXIS, range: pad(fat), title: { text: 'pounds', font: { size: 11 } } },
         annotations: [
             { text: 'Muscle', xref: 'paper', yref: 'paper', x: 0.5, y: 1, showarrow: false,
               font: { size: 12, color: '#6b7280' }, xanchor: 'center', yanchor: 'bottom' },
@@ -263,9 +272,9 @@ function renderPathChart(el, data) {
     }
 
     const layout = {
-        ...BASE_LAYOUT, height: 400,
-        xaxis: { ...BASE_LAYOUT.xaxis, title: 'Muscle (pounds)', type: 'linear' },
-        yaxis: { ...BASE_LAYOUT.yaxis, title: 'Fat (pounds)', scaleanchor: 'x', scaleratio: 1, type: 'linear' },
+        ...baseLayout(), height: 400,
+        xaxis: { ...AXIS, title: 'Muscle (pounds)', type: 'linear' },
+        yaxis: { ...AXIS, title: 'Fat (pounds)', scaleanchor: 'x', scaleratio: 1, type: 'linear' },
         annotations,
     };
 
@@ -311,7 +320,7 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
     }
 
     const layout = {
-        ...BASE_LAYOUT, height: 250, showlegend: false,
+        ...baseLayout(), height: 250, showlegend: false,
         margin: { l: 48, r: 16, t: 22, b: 28 },
         annotations: [
             { text: `${label} (inches)`, xref: 'paper', yref: 'paper', x: 0.5, y: 1,
@@ -361,12 +370,12 @@ function renderNavyChart(el, navyRows, calibrated) {
     }
 
     const layout = {
-        ...BASE_LAYOUT, height: 320,
+        ...baseLayout(), height: 320,
         showlegend: true,
         legend: { orientation: 'h', x: 0.5, xanchor: 'center', y: 1.02, yanchor: 'bottom',
                   font: { size: 11 } },
         margin: { l: 48, r: 16, t: 34, b: 28 },
-        yaxis: { ...BASE_LAYOUT.yaxis, title: { text: '% fat', font: { size: 11 } } },
+        yaxis: { ...AXIS, title: { text: '% fat', font: { size: 11 } } },
     };
 
     Plotly.newPlot(el, traces, layout, CFG);
