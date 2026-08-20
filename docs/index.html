@@ -76,9 +76,18 @@
 
     <!-- Charts Tab -->
     <div id="charts-tab" class="tab-content">
-        <div class="card" style="padding:18px 14px 10px">
+        <div class="card" style="padding:14px 14px 10px">
+            <div id="range-presets" class="range-presets">
+                <button type="button" data-months="1">1M</button>
+                <button type="button" data-months="3">3M</button>
+                <button type="button" data-months="6">6M</button>
+                <button type="button" data-months="12">1Y</button>
+                <button type="button" data-months="36">3Y</button>
+                <button type="button" data-months="0">All</button>
+            </div>
             <div id="slider-label"></div>
             <input type="range" id="range-slider" min="0" max="120" value="108" step="1">
+            <div id="range-empty" class="muted" style="display:none;text-align:center;padding:8px 0 4px"></div>
         </div>
 
         <div class="card" style="padding:6px 8px 2px">

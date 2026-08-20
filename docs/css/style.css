@@ -215,6 +215,35 @@ button#save-btn:active { background: #e5e7eb; }
 .entry-header span:not(:first-child) { text-align: right; }
 .muted { color: #9ca3af; font-size: 0.85rem; }
 
+/* ── Range presets ────────────────────────────────────── */
+/* Short windows are the ones the slider can't hit: with years of history one
+   month is a couple of pixels of travel at the far right of the track. These
+   pills are the coarse control; the slider stays for anything in between. */
+.range-presets {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.range-presets button {
+    flex: 1;
+    padding: 8px 0;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: #6b7280;
+    background: #f3f4f6;
+    border: 1px solid #e5e7eb;
+    border-radius: 7px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.range-presets button:active { background: #e5e7eb; }
+.range-presets button.active {
+    color: #fff;
+    background: #111827;
+    border-color: #111827;
+}
+
 /* ── Slider ───────────────────────────────────────────── */
 #slider-label {
     text-align: center;

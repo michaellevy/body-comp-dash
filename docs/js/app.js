@@ -211,35 +211,80 @@ document.addEventListener('DOMContentLoaded', async () => {
         el.innerHTML = html;
     }
 
-    // ── Slider ─────────────────────────────────────────
+    // ── Range control ──────────────────────────────────
+    // Two ways in, one piece of state. The slider spans the whole history one
+    // month per step, which makes the recent end unreachable on a phone: with
+    // years of data a three-month window is a few pixels of travel pinned
+    // against the right edge. The presets jump straight to those short windows.
+    // `sinceDate` is what the charts actually read, so neither control can
+    // disagree with what's on screen.
     const slider = document.getElementById('range-slider');
     const sliderLabel = document.getElementById('slider-label');
+    const presetRow = document.getElementById('range-presets');
     let allData = [];
+    let sinceDate = null;   // 'YYYY-MM-DD', or null for the full history
 
-    function sliderToDate(val) {
+    // Presets count back from today rather than snapping to a month boundary —
+    // "1M" on the 20th should mean four weeks, not seven.
+    function monthsAgo(n) {
         const now = new Date();
-        const months = parseInt(slider.max) - parseInt(val);
-        if (months <= 0) return null; // all data
-        const d = new Date(now.getFullYear(), now.getMonth() - months, 1);
+        const d = new Date(now.getFullYear(), now.getMonth() - n, now.getDate());
+        // Day overflow: Aug 31 minus six months is Feb 31, which rolls forward
+        // into March. setDate(0) pulls back to the last day of the month we
+        // meant, so the window is never shorter than asked for.
+        if (d.getDate() !== now.getDate()) d.setDate(0);
         return tape.localDateStr(d);
     }
 
-    function updateSliderLabel() {
-        const since = sliderToDate(slider.value);
-        if (!since) {
-            sliderLabel.textContent = 'All data';
-        } else {
-            sliderLabel.textContent = 'From ' + since.slice(0, 7);
-        }
+    function monthsLabel(n) {
+        if (n === 1) return 'Last month';
+        if (n === 12) return 'Last year';
+        if (n % 12 === 0) return `Last ${n / 12} years`;
+        return `Last ${n} months`;
     }
 
-    slider.addEventListener('input', () => {
-        updateSliderLabel();
-    });
+    // The slider keeps its month-boundary semantics: dragging it is a coarse
+    // "show me from about here" gesture, and a whole month reads cleaner as a
+    // label than whatever day the thumb happened to land on.
+    function sliderToDate(val) {
+        const months = parseInt(slider.max) - parseInt(val);
+        if (months <= 0) return null;
+        const now = new Date();
+        return tape.localDateStr(new Date(now.getFullYear(), now.getMonth() - months, 1));
+    }
 
-    slider.addEventListener('change', () => {
+    function markPreset(months) {
+        presetRow.querySelectorAll('button').forEach(b => {
+            b.classList.toggle('active', months !== null && +b.dataset.months === months);
+        });
+    }
+
+    // Moving the slider hands control back to it, so whichever pill was lit is
+    // no longer describing the window and gets cleared.
+    function setFromSlider() {
+        sinceDate = sliderToDate(slider.value);
+        markPreset(null);
+        sliderLabel.textContent = sinceDate ? 'From ' + sinceDate.slice(0, 7) : 'All data';
+    }
+
+    function setPreset(months) {
+        sinceDate = months > 0 ? monthsAgo(months) : null;
+        // Park the thumb at the matching month so the slider reads as the same
+        // window, and a follow-up drag starts from where the preset left off.
+        slider.value = months > 0 ? Math.max(0, parseInt(slider.max) - months) : 0;
+        markPreset(months);
+        sliderLabel.textContent = months > 0 ? monthsLabel(months) : 'All data';
+    }
+
+    presetRow.addEventListener('click', e => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        setPreset(+btn.dataset.months);
         refreshCharts();
     });
+
+    slider.addEventListener('input', setFromSlider);
+    slider.addEventListener('change', () => { refreshCharts(); });
 
     // ── Charts ─────────────────────────────────────────
     // Hide a chart's card entirely when it has nothing to show, rather than
@@ -392,7 +437,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     async function refreshCharts() {
         allData = await db.getAllMeasurements();
         const tapeRows = await db.getAllTape();
-        const since = sliderToDate(slider.value);
+        const since = sinceDate;
 
         let filtered = allData;
         let filteredTape = tapeRows;
@@ -408,7 +453,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const navyAll = tape.navySeries(tapeRows, db.getHeight());
         const navyRows = since ? navyAll.filter(r => r.date >= since) : navyAll;
 
-        // The slider is the master control: moving it drops any zoom the charts
+        // The range control is the master: changing it drops any zoom the charts
         // were holding, so they all come back on the new window together.
         chartData = { cal, tape: filteredTape, navy: navyRows };
         linkedRange = null;
@@ -431,6 +476,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         charts.renderNavyChart('navy-chart', navyRows, cal);
         showCard('navy-chart', navyRows.length > 0);
+
+        // A short preset can land on a stretch with nothing logged, which would
+        // otherwise hide every card and leave the page looking broken.
+        const empty = document.getElementById('range-empty');
+        const nothing = cal.length === 0 && filteredTape.length === 0;
+        empty.style.display = nothing ? '' : 'none';
+        empty.textContent = nothing ? 'Nothing logged in this window.' : '';
 
         wireRangeLinking();
         // Start every chart on the shared window rather than on its own autorange,
@@ -456,16 +508,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         refreshTapeDue();
     })();
 
-    // Set slider range based on data
+    // Size the slider to the data, and drop presets that reach past the start of
+    // it — on a two-month history a "3Y" pill is just another way to say "All".
     const all = await db.getAllMeasurements();
+    let totalMonths = 0;
     if (all.length) {
         const earliest = new Date(all[0].date);
         const now = new Date();
-        const totalMonths = (now.getFullYear() - earliest.getFullYear()) * 12 + (now.getMonth() - earliest.getMonth());
+        totalMonths = (now.getFullYear() - earliest.getFullYear()) * 12 + (now.getMonth() - earliest.getMonth());
         slider.max = totalMonths;
-        slider.value = Math.max(0, totalMonths - 12); // default 1 year
+        presetRow.querySelectorAll('button').forEach(b => {
+            const m = +b.dataset.months;
+            if (m > 0 && m >= totalMonths) b.style.display = 'none';
+        });
     }
-    updateSliderLabel();
+    setPreset(totalMonths > 12 ? 12 : 0);  // default to a year, or everything
     refreshRecent();
     refreshTapeDue();
 });
