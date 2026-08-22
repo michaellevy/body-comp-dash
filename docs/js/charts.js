@@ -198,10 +198,52 @@ function renderMuscleFatChart(el, data) {
           xaxis: 'x2', yaxis: 'y2', hoverinfo: 'skip' },
     ];
 
+    // ── Gold-standard scans over the fat series ──────────────────────────────
+    // Only the fat panel gets them. The two InBody scans do report muscle mass,
+    // but MUSCLE_OF_LEAN is deliberately built from their RATIO rather than
+    // their absolute number, so predicted muscle sits 1.7–3.0 lbs above what
+    // they printed by construction — plotting those would draw a permanent gap
+    // that looks like drift and isn't.
+    //
+    // Anchors carry fat POUNDS on the densitometry level (see ANCHORS in
+    // calibration.js), which is what makes all four comparable to this curve and
+    // to each other. Restricted to the plotted window so a range preset doesn't
+    // drag the axis back to 2015.
+    //
+    // The bound is asymmetric on purpose. On the left it is hard: an anchor
+    // older than the window is out of scope, full stop. On the right it carries
+    // a grace period, because the data extent is only a PROXY for the window —
+    // a scan taken after the last weigh-in is still inside the range you asked
+    // for, your readings just haven't caught up to it. Without the grace, a
+    // fresh scan stays invisible until the next time you step on the scale,
+    // which is exactly when you most want to see where it landed. 45 days is
+    // past any normal weigh-in gap and costs at most a stub of empty axis.
+    const ANCHOR_GRACE_DAYS = 45;
+    const lo = dates[0], hi = dates[dates.length - 1];
+    const hiGrace = tape.localDateStr(new Date(new Date(hi + 'T00:00:00').getTime()
+                                               + ANCHOR_GRACE_DAYS * 86400000));
+    const anchors = (window.ANCHORS || []).filter(a => a.date >= lo && a.date <= hiGrace);
+
+    if (anchors.length) {
+        traces.push({
+            x: anchors.map(a => a.date), y: anchors.map(a => a.fat_lbs),
+            mode: 'markers', xaxis: 'x2', yaxis: 'y2',
+            marker: { size: 13, symbol: 'diamond-open', color: '#b45309', line: { width: 2.5 } },
+            customdata: anchors.map(a => [a.method, a.fat, a.fat_densi]),
+            hovertemplate: '<b>%{x|%b %d, %Y}</b><br>%{customdata[0]}<br>'
+                         + '%{y:.1f} lbs fat<extra></extra>',
+            hoverlabel: HOVERLABEL,
+        });
+    }
+
     const pad = (arr) => {
         const mn = Math.min(...arr), mx = Math.max(...arr), p = (mx - mn) * 0.08;
         return [mn - p, mx + p];
     };
+    // Anchors join the fat axis range so a scan can never land off-screen — an
+    // invisible anchor is worse than no anchor, since the panel would then look
+    // like agreement it hasn't demonstrated.
+    const fatSpan = fat.concat(anchors.map(a => a.fat_lbs));
 
     const layout = {
         ...baseLayout(), height: 600, showlegend: false,
@@ -210,7 +252,7 @@ function renderMuscleFatChart(el, data) {
         xaxis: { ...AXIS },
         yaxis: { ...AXIS, range: pad(muscle), title: { text: 'pounds', font: { size: 11 } } },
         xaxis2: { ...AXIS, matches: 'x' },
-        yaxis2: { ...AXIS, range: pad(fat), title: { text: 'pounds', font: { size: 11 } } },
+        yaxis2: { ...AXIS, range: pad(fatSpan), title: { text: 'pounds', font: { size: 11 } } },
         annotations: [
             { text: 'Muscle', xref: 'paper', yref: 'paper', x: 0.5, y: 1, showarrow: false,
               font: { size: 12, color: '#6b7280' }, xanchor: 'center', yanchor: 'bottom' },
@@ -333,8 +375,10 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
 }
 
 // ── 5. Navy vs BIA chart ───────────────────────────────
-// The drift check: the calibrated BIA curve rests on 3 gold-standard anchors and
-// extrapolates linearly past the heaviest one. The Navy estimate is biased high
+// The drift check for the tape era. The calibrated BIA curve rests on 4 gold-
+// standard anchors (drawn on the fat chart, not here — this panel's x-range is
+// tape-era only and the earliest anchor is 2015) and extrapolates past the
+// heaviest one. The Navy estimate is biased high
 // for lean muscular builds, so the two lines are NOT expected to coincide —
 // what matters is whether the gap between them stays constant. A widening gap
 // means the BIA extrapolation is going off.
