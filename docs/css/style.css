@@ -266,3 +266,24 @@ input[type="range"] {
 
 /* ── Charts ───────────────────────────────────────────── */
 .chart-container { min-height: 200px; }
+
+/* Vertical swipes belong to the page; horizontal ones belong to the chart.
+ *
+ * Plotly's drag layer covers the whole plotting area and calls preventDefault
+ * on touchstart AND touchmove, so on a phone a swipe that begins anywhere over
+ * a chart is swallowed — and because the default drag mode is zoom, a scroll
+ * gesture reads as a drag box and the chart zooms instead of the page moving.
+ * With a stack of charts there is barely anywhere left to put a thumb.
+ *
+ * touch-action is the fix rather than unbinding Plotly's handlers, because the
+ * browser resolves it in the compositor BEFORE the listener runs: a vertical
+ * pan is simply not cancelable any more, so preventDefault no longer applies to
+ * it. Horizontal gestures are untouched and still reach Plotly, which is what
+ * keeps the linked date window pannable — verified, along with the touch-action
+ * actually reaching rect.nsewdrag, which is the element under the thumb.
+ *
+ * !important because Plotly's own rules on that element are more specific than
+ * anything reachable from here. The cost is pinch-zoom on a chart, which the
+ * range presets and slider already cover. */
+.chart-container,
+.chart-container * { touch-action: pan-y !important; }

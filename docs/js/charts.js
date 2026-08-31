@@ -59,8 +59,22 @@ const CFG = { displayModeBar: false, responsive: true };
 // the line doesn't chase individual readings. It's computed PER OUTPUT DAY, so
 // a sparse history followed by daily weighing gets a wide kernel over the old
 // data and a tight one over the recent data — not one compromise for both.
+// The bandwidth also has to answer to how STICKY the noise is, not only how
+// often the tape or scale comes out. Weight readings a day apart share most of
+// their water and glycogen, so a 6-day window over daily weigh-ins can hold
+// barely two independent states however many readings fall inside it — and the
+// band then correctly, and uselessly, reports a couple of pounds of doubt.
+//
+// The fix is not to draw a narrower band over the same window; it is to use a
+// window wide enough to have earned a narrow one. Since the effective count
+// grows in proportion to sigma, multiplying sigma by exactly the variance
+// inflation that autocorrelation costs buys the information back — the two
+// cancel, and the band lands where it would have if the readings had been
+// independent all along. It costs nothing in lag, because a local line follows
+// a straight trend at any bandwidth; that is what made this affordable, and
+// with a local mean it would not have been.
 const SIGMA_MIN = 6;     // days — daily weighing; tighter than this tracks noise
-const SIGMA_MAX = 28;    // days — very sparse; beyond this the line goes rigid
+const SIGMA_MAX = 45;    // days — beyond this even a local line goes rigid
 const SIGMA_SPAN = 6;    // sigma spans about this many typical gaps
 const NEIGHBORS = 10;    // readings used to estimate local spacing
 const SIGMA_BLEND = 21;  // days — sigma is itself smoothed over this half-width
@@ -187,9 +201,23 @@ function localSpacingDays(ts, t, k) {
     return gaps.length % 2 ? gaps[m] : (gaps[m - 1] + gaps[m]) / 2;
 }
 
-function sigmaFor(spacingDays) {
+// How much the variance is inflated at this spacing by persistence in the
+// noise. 1 when the noise is all independent per-session error, rising toward
+// the full AR(1) factor when it is all physiology. Used twice, and it has to be
+// the same number both times: once to widen the bandwidth so the inflation is
+// paid for in data, and once on what inflation is left over after that.
+function arInflation(noise, spacingDays) {
+    if (!noise || !noise.rho) return 1;
+    const ph = Math.pow(noise.rho, Math.max(1, spacingDays));
+    const arFactor = (1 + ph) / (1 - ph);
+    return (noise.nugget + noise.sill * arFactor) / noise.variance;
+}
+
+function sigmaFor(spacingDays, inflate, stdDays) {
+    if (stdDays) return Math.min(SIGMA_MAX, stdDays * inflate);
     if (spacingDays == null) return SIGMA_MAX;
-    return Math.min(SIGMA_MAX, Math.max(SIGMA_MIN, SIGMA_SPAN * spacingDays));
+    return Math.min(SIGMA_MAX,
+                    Math.max(SIGMA_MIN, SIGMA_SPAN * spacingDays * inflate));
 }
 
 // Running mean over a series — used on the sigma track, not the data.
@@ -298,11 +326,18 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     // track gets the same treatment for the same reason — it drives the AR(1)
     // inflation, and an abrupt step there would kink the band edges.
     const rawSpacing = grid.map(t => localSpacingDays(ts, t, NEIGHBORS));
-    const sigmas = stdDays
-        ? grid.map(() => stdDays)
-        : movingAverage(rawSpacing.map(sigmaFor), SIGMA_BLEND);
     const spacing = movingAverage(
         rawSpacing.map(s => s == null ? SIGMA_MAX : s), SIGMA_BLEND);
+
+    // The variogram reads raw readings, not residuals, so it can be fitted
+    // before anything else and hand the bandwidth its own noise structure.
+    const dayIdx = [];
+    for (let j = 0; j < pts.length; j++) dayIdx.push(Math.round((ts[j] - start) / dayMs));
+    const noise = noiseFromVariogram(dayIdx, pts.map(p => p.v));
+
+    const inflations = spacing.map(sp => arInflation(noise, sp));
+    const sigmas = movingAverage(
+        rawSpacing.map((sp, i) => sigmaFor(sp, inflations[i], stdDays)), SIGMA_BLEND);
 
     // Pass 1 — the fit.
     //
@@ -379,11 +414,6 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     // touched. Only ever upward: residuals noisier than the variogram means the
     // trend line is missing real structure, and the wider band is the honest
     // reading of that.
-    const dayIdx = [];
-    for (let j = 0; j < pts.length; j++) dayIdx.push(Math.round((ts[j] - start) / dayMs));
-    const noise = noiseFromVariogram(dayIdx, pts.map(p => p.v));
-    const rho = noise ? noise.rho : 0;
-
     let scale = 1;
     if (noise) {
         let sr = 0, sl = 0;
@@ -410,12 +440,9 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
             // autocorrelation. The nugget averages down with n_eff like any
             // independent error, so the effective inflation is a blend of the
             // two — it collapses to 1 for pure tape error and to the full
-            // AR(1) factor for pure physiology.
-            const ph = Math.pow(rho, Math.max(1, spacing[i]));
-            const arFactor = (1 + ph) / (1 - ph);
-            const inflate = noise
-                ? (noise.nugget + noise.sill * arFactor) / noise.variance
-                : 1;
+            // AR(1) factor for pure physiology. The bandwidth was widened by
+            // this same factor above, which is what pays for it.
+            const inflate = inflations[i];
             // Two different effective counts, and they are not interchangeable.
             //
             // SUM l² sets how precise the FIT is — at the right edge the local
