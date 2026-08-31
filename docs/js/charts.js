@@ -614,8 +614,9 @@ function renderPathChart(el, data) {
 const SERIES_A = '#6A5ACD';  // slateblue
 const SERIES_B = '#1f9e89';  // teal — validated ΔE 19.6 (deutan) vs SERIES_A
 
-// dense: weekly data, worth a Gaussian trend line. Sparse monthly sites get a
-// plain connector instead — smoothing 6 points invents a curve that isn't there.
+// dense: measured every few days, worth a Gaussian trend line. Sparse monthly
+// sites get a plain connector instead — smoothing 6 points invents a curve that
+// isn't there.
 function renderCircumferenceChart(el, tapeRows, key, label, dense) {
     const rows = tapeRows.filter(r => r[key] != null);
     if (!rows.length) { Plotly.purge(el); return; }
@@ -634,8 +635,14 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
     }];
 
     if (dense && rows.length >= 3) {
-        // Tighter than the weight smoother: waist is weekly and low-noise, so a
-        // 90/20 kernel would flatten exactly the change we're looking for.
+        // Tighter than the weight smoother: waist is low-noise, so a 90/20
+        // kernel would flatten exactly the change we're looking for.
+        //
+        // Pinned rather than adaptive, and left at 14 days as the cadence went
+        // from weekly to every three days. Widening it would buy a narrower
+        // band — it is the only lever on the physiological half of the noise —
+        // but at the cost of a staler line, and the point of measuring more
+        // often was to see change sooner, not to average over more of it.
         const sm = gaussianSmooth(x, y, 60, 14);
         traces.push(...bandTraces(sm, BAND_TREND));
         traces.push({

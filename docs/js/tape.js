@@ -1,10 +1,23 @@
 // Tape measurements — site definitions, due logic, Navy fat% estimate.
 //
 // Cadence rationale: waist is the only site precise enough to resolve change
-// week to week. Bicep and thigh move a few mm per YEAR of real hypertrophy,
-// which is smaller than session-to-session tape error — measuring them weekly
-// would record noise, so they're monthly. Neck is monthly because it drifts
-// slowly with weight; a one-time value would go stale.
+// inside a few days. Bicep and thigh move a few mm per YEAR of real
+// hypertrophy, which is smaller than session-to-session tape error — measuring
+// them weekly would record noise, so they're monthly. Neck is monthly because
+// it drifts slowly with weight; a one-time value would go stale.
+//
+// Waist runs every three days rather than weekly, which buys about a quarter
+// off the width of its confidence band. Two things bound that gain, and both
+// are worth knowing before reaching for an even shorter interval.
+//
+// Tape error is independent every session and averages away as 1/sqrt(n), so
+// frequency does help — but only that half of the noise. The other half is
+// water, glycogen and gut content, which persist for roughly three days: a
+// reading taken inside that window re-measures the same state rather than
+// sampling a new one. That part of the variance is set by how wide the
+// smoother averages, not by how often the tape comes out, and no cadence gets
+// under it. Three days is about where the first term stops paying: going to
+// daily is more than twice the sessions for a few more percent.
 
 // Cues are deliberately specific — a named landmark and a fixed side. Vague
 // instructions ("mid-thigh") are the main source of tape error, and error at
@@ -15,7 +28,7 @@
 const SHARED_CUE = 'Morning, right after the weigh-in and before eating. Tape snug but not compressing the skin.';
 
 const TAPE_SITES = [
-    { key: 'waist', label: 'Waist', intervalDays: 7,
+    { key: 'waist', label: 'Waist', intervalDays: 3,
       cue: 'Level with your navel, standing relaxed. Measure at the end of a normal exhale — don’t suck in or push out.' },
     { key: 'neck',  label: 'Neck',  intervalDays: 30,
       cue: 'Just below the Adam’s apple, tape sloping slightly downward at the front. Shoulders relaxed.' },
