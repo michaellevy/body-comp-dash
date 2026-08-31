@@ -46,14 +46,73 @@ const SIGMA_SPAN = 6;    // sigma spans about this many typical gaps
 const NEIGHBORS = 10;    // readings used to estimate local spacing
 const SIGMA_BLEND = 21;  // days — sigma is itself smoothed over this half-width
 
+// ── Confidence band ───────────────────────────────────────────────────────
+// The band answers the only question the trend line is actually being asked:
+// is today's line genuinely below last month's, or is that the noise talking?
+//
+// At each output day the fit is a weighted mean of nearby readings, so its
+// standard error is the usual sigma/sqrt(n) with the kernel weights supplying
+// both terms: n_eff = (Σw)²/Σw², and sigma² estimated from the SAME kernel
+// applied to squared residuals (leverage-corrected — see pass 2). That makes
+// the band widen exactly where it should — sparse stretches, noisy stretches,
+// and the two ends of the series, where half the kernel hangs off the edge of
+// the data.
+//
+// It is a band on the TREND, not on tomorrow's reading: it says where the
+// underlying level sits, and individual readings are expected to fall outside
+// it. It also can't see smoothing bias, so it understates the uncertainty
+// wherever the true curve turns sharply relative to the bandwidth.
+const Z95 = 1.959964;
+
+// sigma is estimated, not known, so the multiplier is a t quantile and not z.
+// The difference is the whole ballgame on a sparse series: weekly tape readings
+// put only ~7 readings' worth of weight under the kernel, where t is 2.45 and
+// using 1.96 costs about five points of coverage. Cornish-Fisher expansion of
+// t_.975 in 1/df — within 0.001 of exact by df = 6, and df is floored at 3
+// because the series where it would go lower has no trend worth banding.
+function t95(df) {
+    const v = Math.max(3, df), z = Z95, z3 = z * z * z, z5 = z3 * z * z, z7 = z5 * z * z;
+    return z
+        + (z3 + z) / (4 * v)
+        + (5 * z5 + 16 * z3 + 3 * z) / (96 * v * v)
+        + (3 * z7 + 19 * z5 + 17 * z3 - 15 * z) / (384 * v * v * v);
+}
+
+// Readings a day or two apart are not independent. Water, glycogen and gut
+// content persist across days, so a high reading is usually followed by another
+// high one; treating them as independent reports a band far tighter than the
+// data supports — a factor of 2 at p = 0.6. The variance is inflated by the
+// AR(1) effective-sample-size factor (1+p^h)/(1-p^h), evaluated at the LOCAL
+// spacing h. Using p^h rather than p makes the correction self-limiting:
+// readings a month apart get p^30 ≈ 0 and no inflation at all, so a sparse era
+// is never penalised for a dense era's stickiness.
+//
+// p and the noise level both come from a VARIOGRAM on the raw readings, not
+// from the fit's residuals. For a pair d days apart, E[(y2-y1)²]/2 =
+// sigma²(1-p^d) — two lags identify both quantities, and a real trend
+// contributes only (slope·d)², which is nothing across one or two days. This
+// matters: residuals are the wrong instrument here, because the smoother
+// absorbs exactly the low-frequency wiggle that autocorrelation creates. In
+// simulation, residuals recover p = 0.42 and sigma = 0.84 from a series built
+// with p = 0.6 and sigma = 1.0, and the two errors compound into a band with
+// 82% coverage instead of 95%.
+const VARIO_MIN_PAIRS = 15;  // per lag; below this the variogram is noise
+const AR_RHO_MAX = 0.85;     // cap: beyond here the inflation runs away
+
+// First index of ts at or after t. ts is sorted ascending.
+function lowerBound(ts, t) {
+    let lo = 0, hi = ts.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (ts[mid] < t) lo = mid + 1; else hi = mid; }
+    return lo;
+}
+
 // Local spacing between readings, measured directly: expand outward from t
 // until k readings are collected (they're always a contiguous run in the sorted
 // series), then take the MEDIAN gap between them. Measuring the gaps beats
 // dividing a radius by a count — no special case for the ends of the series,
 // and a single outlying gap can't drag the estimate.
 function localSpacingDays(ts, t, k) {
-    let lo = 0, hi = ts.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (ts[mid] < t) lo = mid + 1; else hi = mid; }
+    const lo = lowerBound(ts, t);
 
     let i = lo - 1, j = lo, found = 0;
     while (found < k && (i >= 0 || j < ts.length)) {
@@ -72,10 +131,9 @@ function localSpacingDays(ts, t, k) {
     return gaps.length % 2 ? gaps[m] : (gaps[m - 1] + gaps[m]) / 2;
 }
 
-function adaptiveSigma(ts, t) {
-    const spacing = localSpacingDays(ts, t, NEIGHBORS);
-    if (!spacing) return SIGMA_MAX;
-    return Math.min(SIGMA_MAX, Math.max(SIGMA_MIN, SIGMA_SPAN * spacing));
+function sigmaFor(spacingDays) {
+    if (spacingDays == null) return SIGMA_MAX;
+    return Math.min(SIGMA_MAX, Math.max(SIGMA_MIN, SIGMA_SPAN * spacingDays));
 }
 
 // Running mean over a series — used on the sigma track, not the data.
@@ -89,15 +147,45 @@ function movingAverage(arr, halfWidth) {
     });
 }
 
+// Noise level and day-to-day persistence, read off the variogram at lags 1 and
+// 2 days. Returns null when the series is too sparse for either lag to have
+// enough pairs — weekly tape readings, for instance, where daily persistence is
+// both unmeasurable and irrelevant, since p^7 is already negligible.
+function noiseFromVariogram(dayIdx, vals) {
+    const by = new Map();
+    dayIdx.forEach((d, i) => by.set(d, vals[i]));
+
+    const semi = (lag) => {
+        let sum = 0, pairs = 0;
+        for (let i = 0; i < dayIdx.length; i++) {
+            const other = by.get(dayIdx[i] + lag);
+            if (other === undefined) continue;
+            const diff = other - vals[i];
+            sum += diff * diff; pairs++;
+        }
+        return pairs >= VARIO_MIN_PAIRS ? sum / (2 * pairs) : null;
+    };
+
+    const g1 = semi(1), g2 = semi(2);
+    if (!g1 || !g2 || g1 <= 0) return null;
+    // g2/g1 = (1-p²)/(1-p) = 1+p
+    const rho = Math.min(AR_RHO_MAX, Math.max(0, g2 / g1 - 1));
+    return { rho, variance: g1 / (1 - rho) };
+}
+
 // stdDays: pass a number to pin the bandwidth; omit it to adapt to density.
+// Returns { x, y, lo, hi } — lo/hi are the 95% band, and null on any day whose
+// kernel holds a single isolated reading, which has no residual to speak of and
+// so supports no band at all.
 function gaussianSmooth(dates, values, windowDays, stdDays) {
-    if (dates.length < 3) return { x: dates, y: values };
+    const bare = { x: dates, y: values, lo: [], hi: [] };
+    if (dates.length < 3) return bare;
 
     const pts = dates
         .map((d, i) => ({ t: new Date(d + 'T00:00:00').getTime(), v: values[i] }))
         .filter(p => !isNaN(p.t) && p.v != null)
         .sort((a, b) => a.t - b.t);
-    if (pts.length < 3) return { x: dates, y: values };
+    if (pts.length < 3) return bare;
 
     const ts = pts.map(p => p.t);
     const dayMs = 86400000;
@@ -110,29 +198,142 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     // The median gap flips abruptly where a sparse stretch meets a dense one,
     // which would step sigma from 28 to 6 between adjacent days and put a
     // visible kink in the trend line. Smoothing the sigma track first makes the
-    // bandwidth ease across the transition instead of snapping.
+    // bandwidth ease across the transition instead of snapping. The spacing
+    // track gets the same treatment for the same reason — it drives the AR(1)
+    // inflation, and an abrupt step there would kink the band edges.
+    const rawSpacing = grid.map(t => localSpacingDays(ts, t, NEIGHBORS));
     const sigmas = stdDays
         ? grid.map(() => stdDays)
-        : movingAverage(grid.map(t => adaptiveSigma(ts, t)), SIGMA_BLEND);
+        : movingAverage(rawSpacing.map(sigmaFor), SIGMA_BLEND);
+    const spacing = movingAverage(
+        rawSpacing.map(s => s == null ? SIGMA_MAX : s), SIGMA_BLEND);
 
-    const x = [], y = [];
+    // Pass 1 — the fit, plus the weight sums the standard error needs.
+    const fit = new Float64Array(nDays);
+    const sumW = new Float64Array(nDays);
+    const sumW2 = new Float64Array(nDays);
+    const lo = new Int32Array(nDays), hi = new Int32Array(nDays);
+    const ok = new Uint8Array(nDays);
     for (let i = 0; i < nDays; i++) {
-        const t = grid[i], sigma = sigmas[i];
-        const cutoff = sigma * 3 * dayMs;
-        let wsum = 0, wval = 0;
-        for (let j = 0; j < pts.length; j++) {
-            const dist = Math.abs(pts[j].t - t);
-            if (dist > cutoff) continue;
-            const w = Math.exp(-0.5 * ((dist / dayMs) / sigma) ** 2);
-            wsum += w;
-            wval += w * pts[j].v;
+        const t = grid[i], sigma = sigmas[i], cutoff = sigma * 3 * dayMs;
+        const a = lowerBound(ts, t - cutoff), b = lowerBound(ts, t + cutoff + 1);
+        lo[i] = a; hi[i] = b;
+        let sw = 0, sw2 = 0, sv = 0;
+        for (let j = a; j < b; j++) {
+            const w = Math.exp(-0.5 * (((ts[j] - t) / dayMs) / sigma) ** 2);
+            sw += w; sw2 += w * w; sv += w * pts[j].v;
         }
-        if (wsum > 0) {
-            x.push(tape.localDateStr(new Date(t)));
-            y.push(wval / wsum);
+        if (sw > 0) { fit[i] = sv / sw; sumW[i] = sw; sumW2[i] = sw2; ok[i] = 1; }
+    }
+
+    // Pass 2 — residuals about the fit. Every reading falls on a grid day
+    // exactly (dates are calendar days), so no interpolation is needed.
+    //
+    // A residual is smaller than the noise that produced it, because the fit it
+    // is measured against was itself pulled toward that reading. The shrinkage
+    // is exactly 1 - 2·L_jj + Σ_k L_jk², the smoother's leverage at j: dividing
+    // the weighted residual sum by Σ w·lev instead of by Σ w undoes it. This
+    // matters most where it is easiest to get wrong — at the ends of the series
+    // and in sparse stretches, where a reading dominates its own fit, residuals
+    // collapse, and an uncorrected band would be at its most confident exactly
+    // where it has the least right to be. The kernel is 1 at zero distance, so
+    // L_jj is just 1/Σw.
+    const resid = new Float64Array(pts.length);
+    const lev = new Float64Array(pts.length);
+    for (let j = 0; j < pts.length; j++) {
+        const gi = Math.round((ts[j] - start) / dayMs);
+        if (!ok[gi]) continue;
+        resid[j] = pts[j].v - fit[gi];
+        lev[j] = 1 - 2 / sumW[gi] + sumW2[gi] / (sumW[gi] * sumW[gi]);
+    }
+
+    // The residual track has the right SHAPE — it finds the noisy stretches —
+    // but the fit has shrunk its overall level, and the leverage correction
+    // above only undoes the part of that shrinkage attributable to independent
+    // noise. Rescale the whole track to the variogram's level, which no fit has
+    // touched. Only ever upward: residuals noisier than the variogram means the
+    // trend line is missing real structure, and the wider band is the honest
+    // reading of that.
+    const dayIdx = [];
+    for (let j = 0; j < pts.length; j++) dayIdx.push(Math.round((ts[j] - start) / dayMs));
+    const noise = noiseFromVariogram(dayIdx, pts.map(p => p.v));
+    const rho = noise ? noise.rho : 0;
+
+    let scale = 1;
+    if (noise) {
+        let sr = 0, sl = 0;
+        for (let j = 0; j < pts.length; j++) { sr += resid[j] * resid[j]; sl += lev[j]; }
+        if (sr > 0 && sl > 0) scale = Math.max(1, noise.variance / (sr / sl));
+    }
+
+    // Pass 3 — local residual variance through the same kernel, then the band.
+    const xs = [], ys = [], loBand = [], hiBand = [];
+    for (let i = 0; i < nDays; i++) {
+        if (!ok[i]) continue;
+        const t = grid[i], sigma = sigmas[i];
+        let sr = 0, sc = 0;
+        for (let j = lo[i]; j < hi[i]; j++) {
+            const w = Math.exp(-0.5 * (((ts[j] - t) / dayMs) / sigma) ** 2);
+            sr += w * resid[j] * resid[j];
+            sc += w * lev[j];
+        }
+        xs.push(tape.localDateStr(new Date(t)));
+        ys.push(fit[i]);
+        if (sc > 0) {
+            const ph = Math.pow(rho, Math.max(1, spacing[i]));
+            const inflate = (1 + ph) / (1 - ph);
+            // n_eff readings under the kernel, one of them spent on the local
+            // mean the residuals are measured against.
+            const nEff = sumW[i] * sumW[i] / sumW2[i];
+            const half = t95(nEff - 1)
+                       * Math.sqrt((sr / sc) * scale * inflate * sumW2[i]) / sumW[i];
+            loBand.push(fit[i] - half);
+            hiBand.push(fit[i] + half);
+        } else {
+            loBand.push(null);
+            hiBand.push(null);
         }
     }
-    return { x, y };
+    return { x: xs, y: ys, lo: loBand, hi: hiBand };
+}
+
+// Band colours — the trend line's own hue, so on a panel carrying two series
+// each band still reads as belonging to its line.
+//
+// The bands sit ABOVE the markers, which is the opposite of the usual advice
+// and is forced by the data: on a year of near-daily weigh-ins the trend is
+// pinned to well under half a pound, so the band is narrower than a single
+// marker and a dense dot cloud hides it completely. Underneath the dots it was
+// invisible on exactly the panel that has the most to say. So the fill is kept
+// light enough to leave the markers legible through it — this matters most on
+// the weight chart, where marker colour carries fat% and has to stay readable
+// against the colourbar — and the ribbon is instead made unmistakable by
+// drawing its two edges as hairlines.
+const BAND_TREND = { fill: 'rgba(17, 24, 39, 0.10)', edge: 'rgba(17, 24, 39, 0.40)' };
+const BAND_A = { fill: 'rgba(106, 90, 205, 0.13)', edge: 'rgba(106, 90, 205, 0.50)' };
+const BAND_B = { fill: 'rgba(31, 158, 137, 0.13)', edge: 'rgba(31, 158, 137, 0.50)' };
+
+// A 95% band as Plotly draws it: the lower edge, then the upper edge filling
+// down to it. The two must stay ADJACENT in the trace array — `tonexty` fills
+// to whatever trace immediately precedes it, so anything slipped between them
+// becomes the fill target and the band lands somewhere else entirely.
+function bandTraces(sm, colors, axes) {
+    if (!sm.lo || sm.lo.length !== sm.x.length) return [];
+    if (!sm.lo.some(v => v != null)) return [];
+    const common = {
+        ...(axes || {}), mode: 'lines', line: { width: 1, color: colors.edge },
+        hoverinfo: 'skip', showlegend: false, connectgaps: false,
+    };
+    return [
+        { ...common, x: sm.x, y: sm.lo },
+        { ...common, x: sm.x, y: sm.hi, fill: 'tonexty', fillcolor: colors.fill },
+    ];
+}
+
+// Finite band edges only — for folding a band into a manual axis range.
+function bandExtent(sm) {
+    if (!sm.lo) return [];
+    return sm.lo.concat(sm.hi).filter(v => v != null && isFinite(v));
 }
 
 // ── 1. Weight chart ────────────────────────────────────
@@ -163,6 +364,7 @@ function renderWeightChart(el, data) {
             hovertemplate: '<b>%{x|%b %d, %Y}</b><br>%{y:.1f} pounds, %{marker.color:.1f}% fat<extra></extra>',
             hoverlabel: HOVERLABEL,
         },
+        ...bandTraces(sm, BAND_TREND),
         {
             x: sm.x, y: sm.y, mode: 'lines',
             line: { color: 'black', width: 1.5 },
@@ -190,10 +392,12 @@ function renderMuscleFatChart(el, data) {
     const traces = [
         { x: dates, y: muscle, mode: 'markers', marker: mkMarker(), xaxis: 'x', yaxis: 'y',
           hovertemplate: '<b>%{x|%b %d, %Y}</b><br>%{y:.1f} pounds<extra></extra>', hoverlabel: HOVERLABEL },
+        ...bandTraces(smM, BAND_TREND, { xaxis: 'x', yaxis: 'y' }),
         { x: smM.x, y: smM.y, mode: 'lines', line: { color: 'black', width: 1.5 },
           xaxis: 'x', yaxis: 'y', hoverinfo: 'skip' },
         { x: dates, y: fat, mode: 'markers', marker: mkMarker(), xaxis: 'x2', yaxis: 'y2',
           hovertemplate: '<b>%{x|%b %d, %Y}</b><br>%{y:.1f} pounds<extra></extra>', hoverlabel: HOVERLABEL },
+        ...bandTraces(smF, BAND_TREND, { xaxis: 'x2', yaxis: 'y2' }),
         { x: smF.x, y: smF.y, mode: 'lines', line: { color: 'black', width: 1.5 },
           xaxis: 'x2', yaxis: 'y2', hoverinfo: 'skip' },
     ];
@@ -243,14 +447,14 @@ function renderMuscleFatChart(el, data) {
     // Anchors join the fat axis range so a scan can never land off-screen — an
     // invisible anchor is worse than no anchor, since the panel would then look
     // like agreement it hasn't demonstrated.
-    const fatSpan = fat.concat(anchors.map(a => a.fat_lbs));
+    const fatSpan = fat.concat(anchors.map(a => a.fat_lbs), bandExtent(smF));
 
     const layout = {
         ...baseLayout(), height: 600, showlegend: false,
         margin: { l: 48, r: 16, t: 20, b: 28 },
         grid: { rows: 2, columns: 1, subplots: [['xy'], ['x2y2']], roworder: 'top to bottom' },
         xaxis: { ...AXIS },
-        yaxis: { ...AXIS, range: pad(muscle), title: { text: 'pounds', font: { size: 11 } } },
+        yaxis: { ...AXIS, range: pad(muscle.concat(bandExtent(smM))), title: { text: 'pounds', font: { size: 11 } } },
         xaxis2: { ...AXIS, matches: 'x' },
         yaxis2: { ...AXIS, range: pad(fatSpan), title: { text: 'pounds', font: { size: 11 } } },
         annotations: [
@@ -354,6 +558,7 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
         // Tighter than the weight smoother: waist is weekly and low-noise, so a
         // 90/20 kernel would flatten exactly the change we're looking for.
         const sm = gaussianSmooth(x, y, 60, 14);
+        traces.push(...bandTraces(sm, BAND_TREND));
         traces.push({
             x: sm.x, y: sm.y, mode: 'lines',
             line: { color: 'black', width: 2 },
@@ -388,6 +593,15 @@ function renderNavyChart(el, navyRows, calibrated) {
     const bia = calibrated.filter(r => r.fat_percent_cal != null);
     const smNavy = gaussianSmooth(navyRows.map(r => r.date),
                                   navyRows.map(r => r.fat_percent), 60, 14);
+    // Scatter in the readings only. The calibration itself rests on four anchors
+    // and is extrapolating past the heaviest of them; that uncertainty is not in
+    // this band, which says how well the scale agrees with itself, not how close
+    // it is to a dunk tank. Read the two bands for whether the GAP between the
+    // lines is holding steady — overlapping bands here would mean the gap is
+    // within noise, not that the two methods agree.
+    const smBia = bia.length
+        ? gaussianSmooth(bia.map(r => r.date), bia.map(r => r.fat_percent_cal))
+        : null;
 
     const traces = [
         {
@@ -397,16 +611,17 @@ function renderNavyChart(el, navyRows, calibrated) {
             hovertemplate: '<b>%{x|%b %d, %Y}</b><br>%{y:.1f}% (tape)<extra></extra>',
             hoverlabel: HOVERLABEL,
         },
+        ...bandTraces(smNavy, BAND_B),
+        ...(smBia ? bandTraces(smBia, BAND_A) : []),
         {
             x: smNavy.x, y: smNavy.y, mode: 'lines', showlegend: false,
             line: { color: SERIES_B, width: 2 }, hoverinfo: 'skip',
         },
     ];
 
-    if (bia.length) {
-        const sm = gaussianSmooth(bia.map(r => r.date), bia.map(r => r.fat_percent_cal));
+    if (smBia) {
         traces.push({
-            x: sm.x, y: sm.y, mode: 'lines', name: 'Calibrated scale',
+            x: smBia.x, y: smBia.y, mode: 'lines', name: 'Calibrated scale',
             line: { color: SERIES_A, width: 2 },
             hovertemplate: '<b>%{x|%b %d, %Y}</b><br>%{y:.1f}% (scale)<extra></extra>',
             hoverlabel: HOVERLABEL,
