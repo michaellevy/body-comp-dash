@@ -439,13 +439,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         const tapeRows = await db.getAllTape();
         const since = sinceDate;
 
-        let filtered = allData;
-        let filteredTape = tapeRows;
-        if (since) {
-            filtered = allData.filter(r => r.date >= since);
-            filteredTape = tapeRows.filter(r => r.date >= since);
-        }
-        const cal = calibrate(filtered);
+        // Calibration is per-row and takes no notice of the window, so the whole
+        // history is calibrated once and sliced. Both halves are needed: the
+        // window supplies markers and axis ranges, the full series is what the
+        // smoother is fitted on. Refitting a trend on a slice of the data would
+        // throw away the history the noise model needs — see smoothWindowed.
+        const calAll = calibrate(allData);
+        const cal = since ? calAll.filter(r => r.date >= since) : calAll;
+        const filteredTape = since ? tapeRows.filter(r => r.date >= since) : tapeRows;
 
         // Navy is computed over the full history first, then filtered: neck is
         // carried forward from the last monthly reading, which may sit before
@@ -458,8 +459,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         chartData = { cal, tape: filteredTape, navy: navyRows };
         linkedRange = null;
 
-        charts.renderWeightChart('weight-chart', cal);
-        charts.renderMuscleFatChart('muscle-fat-chart', cal);
+        charts.renderWeightChart('weight-chart', cal, calAll);
+        charts.renderMuscleFatChart('muscle-fat-chart', cal, calAll);
         renderPath(null);
 
         // Waist is measured every few days, so it earns a smoothed trend; the
@@ -470,11 +471,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             ['thigh-chart', 'thigh', 'Thigh', false],
             ['neck-chart',  'neck',  'Neck',  false],
         ].forEach(([id, key, label, dense]) => {
-            charts.renderCircumferenceChart(id, filteredTape, key, label, dense);
+            charts.renderCircumferenceChart(id, filteredTape, key, label, dense, tapeRows);
             showCard(id, filteredTape.some(r => r[key] != null));
         });
 
-        charts.renderNavyChart('navy-chart', navyRows, cal);
+        charts.renderNavyChart('navy-chart', navyRows, cal, navyAll, calAll);
         showCard('navy-chart', navyRows.length > 0);
 
         // A short preset can land on a stretch with nothing logged, which would
@@ -522,7 +523,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (m > 0 && m >= totalMonths) b.style.display = 'none';
         });
     }
-    setPreset(totalMonths > 12 ? 12 : 0);  // default to a year, or everything
+    // Default to the last month: the question this dashboard gets asked most is
+    // "what is happening now". Safe to make the default only because the
+    // smoother no longer refits on the window — a one-month view crops the
+    // all-time trend rather than recomputing one from thirty days of readings.
+    // With less than a month on record the two windows are the same, and "All"
+    // is the more honest label for it.
+    setPreset(totalMonths > 1 ? 1 : 0);
     refreshRecent();
     refreshTapeDue();
 });

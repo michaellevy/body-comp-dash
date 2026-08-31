@@ -29,10 +29,29 @@ const VIRIDIS_R = [
 const HOVERLABEL = { bgcolor: 'white', font: { size: 12, family: FONT.family } };
 const CFG = { displayModeBar: false, responsive: true };
 
-// ── Smoothing: kernel regression with density-adaptive bandwidth ──
+// ── Smoothing: local linear regression with density-adaptive bandwidth ──
 // Weights the ACTUAL observations on a daily output grid. The previous version
 // interpolated to daily first and smoothed that, which let a long gap between
 // readings manufacture synthetic points that pulled the average.
+//
+// LOCAL LINEAR, not a local mean. At each output day it fits a straight line
+// through the nearby readings and takes its value there, rather than averaging
+// them. In the middle of a series the two agree. At the two ENDS they do not,
+// and one of those ends is today.
+//
+// A local mean at the right edge has only past readings to average, so during
+// an active change it reports something closer to last fortnight's level than
+// to now — it lags precisely when you most want it not to. A local line has no
+// such bias for a trend that is locally straight, at the boundary or anywhere
+// else; it reads the slope off the data instead of flattening against the edge.
+// On a simulated cut, the fitted line at today went from trailing the truth by
+// a fifth of a pound to tracking it, and coverage of the band at the newest
+// reading improved with it.
+//
+// The cost is variance: a slope estimated from half a kernel is shakier than a
+// mean, so the band widens near the edges. That is the honest trade — the old
+// line was steadier there only because it was quietly answering an easier
+// question.
 //
 // The bandwidth follows how often you've been measuring. Sigma is derived from
 // the local spacing between readings, so daily weigh-ins get a tight kernel
@@ -285,22 +304,49 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     const spacing = movingAverage(
         rawSpacing.map(s => s == null ? SIGMA_MAX : s), SIGMA_BLEND);
 
-    // Pass 1 — the fit, plus the weight sums the standard error needs.
+    // Pass 1 — the fit.
+    //
+    // The local line makes every output day a weighted least squares of two
+    // parameters, whose value at the day itself is a plain linear combination
+    // of the readings: fit = SUM l_j·y_j with SUM l_j = 1. Those effective
+    // weights l are what the standard error needs — SUM l² plays the role
+    // (SUM w)²/SUM w² played for a mean, and 1/SUM l² is the effective count.
     const fit = new Float64Array(nDays);
-    const sumW = new Float64Array(nDays);
-    const sumW2 = new Float64Array(nDays);
+    const selfW = new Float64Array(nDays);   // l of a reading on its own day
+    const sumL2 = new Float64Array(nDays);   // SUM l², the reciprocal of n_eff
     const lo = new Int32Array(nDays), hi = new Int32Array(nDays);
     const ok = new Uint8Array(nDays);
+    const wbuf = new Float64Array(pts.length);   // kernel weights, reused per day
     for (let i = 0; i < nDays; i++) {
         const t = grid[i], sigma = sigmas[i], cutoff = sigma * 3 * dayMs;
         const a = lowerBound(ts, t - cutoff), b = lowerBound(ts, t + cutoff + 1);
         lo[i] = a; hi[i] = b;
-        let sw = 0, sw2 = 0, sv = 0;
+        let s0 = 0, s1 = 0, s2 = 0;
         for (let j = a; j < b; j++) {
-            const w = Math.exp(-0.5 * (((ts[j] - t) / dayMs) / sigma) ** 2);
-            sw += w; sw2 += w * w; sv += w * pts[j].v;
+            const u = (ts[j] - t) / dayMs;
+            const w = Math.exp(-0.5 * (u / sigma) ** 2);
+            wbuf[j] = w;
+            s0 += w; s1 += w * u; s2 += w * u * u;
         }
-        if (sw > 0) { fit[i] = sv / sw; sumW[i] = sw; sumW2[i] = sw2; ok[i] = 1; }
+        if (!(s0 > 0)) continue;
+
+        // s0·s2 - s1² collapses toward zero when the window's readings are all
+        // at (or near) one instant: no slope is identified and the line
+        // degenerates. Fall back to the local mean there, which is what a local
+        // line legitimately reduces to when there is nothing to take a slope
+        // from — never emit a fit built on a near-zero denominator.
+        const den = s0 * s2 - s1 * s1;
+        const linear = den > 1e-9 * s0 * s2;
+
+        let f = 0, sl2 = 0;
+        for (let j = a; j < b; j++) {
+            const u = (ts[j] - t) / dayMs;
+            const l = linear ? wbuf[j] * (s2 - s1 * u) / den : wbuf[j] / s0;
+            f += l * pts[j].v;
+            sl2 += l * l;
+        }
+        fit[i] = f; sumL2[i] = sl2; ok[i] = 1;
+        selfW[i] = linear ? s2 / den : 1 / s0;
     }
 
     // Pass 2 — residuals about the fit. Every reading falls on a grid day
@@ -313,15 +359,17 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     // matters most where it is easiest to get wrong — at the ends of the series
     // and in sparse stretches, where a reading dominates its own fit, residuals
     // collapse, and an uncorrected band would be at its most confident exactly
-    // where it has the least right to be. The kernel is 1 at zero distance, so
-    // L_jj is just 1/Σw.
+    // where it has the least right to be. Both terms were computed in pass 1:
+    // L_jj is the reading's own effective weight, Σ_k L_jk² is SUM l² there.
+    // The identity holds for any linear smoother, so the local line uses it
+    // unchanged — only the weights it is evaluated on have changed.
     const resid = new Float64Array(pts.length);
     const lev = new Float64Array(pts.length);
     for (let j = 0; j < pts.length; j++) {
         const gi = Math.round((ts[j] - start) / dayMs);
         if (!ok[gi]) continue;
         resid[j] = pts[j].v - fit[gi];
-        lev[j] = 1 - 2 / sumW[gi] + sumW2[gi] / (sumW[gi] * sumW[gi]);
+        lev[j] = 1 - 2 * selfW[gi] + sumL2[gi];
     }
 
     // The residual track has the right SHAPE — it finds the noisy stretches —
@@ -348,11 +396,12 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     for (let i = 0; i < nDays; i++) {
         if (!ok[i]) continue;
         const t = grid[i], sigma = sigmas[i];
-        let sr = 0, sc = 0;
+        let sr = 0, sc = 0, sw = 0, sw2 = 0;
         for (let j = lo[i]; j < hi[i]; j++) {
             const w = Math.exp(-0.5 * (((ts[j] - t) / dayMs) / sigma) ** 2);
             sr += w * resid[j] * resid[j];
             sc += w * lev[j];
+            sw += w; sw2 += w * w;
         }
         xs.push(tape.localDateStr(new Date(t)));
         ys.push(fit[i]);
@@ -367,11 +416,23 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
             const inflate = noise
                 ? (noise.nugget + noise.sill * arFactor) / noise.variance
                 : 1;
-            // n_eff readings under the kernel, one of them spent on the local
-            // mean the residuals are measured against.
-            const nEff = sumW[i] * sumW[i] / sumW2[i];
-            const half = t95(nEff - 1)
-                       * Math.sqrt((sr / sc) * scale * inflate * sumW2[i]) / sumW[i];
+            // Two different effective counts, and they are not interchangeable.
+            //
+            // SUM l² sets how precise the FIT is — at the right edge the local
+            // line is spending a half-kernel of data on a slope, so this
+            // collapses, and it should: the value there really is that much
+            // less certain.
+            //
+            // The t multiplier is about something else — how well sigma itself
+            // is pinned down — and that comes from the residual average, which
+            // is still weighting the whole kernel with plain w. Charging the
+            // fit's collapsed count to the variance estimate as well double
+            // counts the boundary: at the last day it drove df to 1, floored
+            // it at 3, and roughly doubled the band over what the data
+            // supported (99-100% coverage where 95% was asked for).
+            const dfVar = sw * sw / sw2 - 2;
+            const half = t95(dfVar)
+                       * Math.sqrt((sr / sc) * scale * inflate * sumL2[i]);
             loBand.push(fit[i] - half);
             hiBand.push(fit[i] + half);
         } else {
@@ -380,6 +441,37 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
         }
     }
     return { x: xs, y: ys, lo: loBand, hi: hiBand };
+}
+
+// Fit on everything, draw the window.
+//
+// The range control filters the DATA, not just the axis, so a short view would
+// otherwise refit the smoother on a slice. That is wrong twice over. A month of
+// readings is too few pairs to estimate the noise structure at all, so the band
+// quietly reverts to assuming independence and comes out around a third too
+// tight — overconfident exactly where someone has zoomed in to look. And the
+// kernel at the window's left edge averages against nothing, when the history
+// it needs is sitting right there in the database.
+//
+// So the trend is always fitted on the full series and then cropped to what is
+// on screen. The line and band in a one-month view are the ones the all-time
+// view would draw, cropped — not a different fit. Markers and axis ranges still
+// come from the window, so only the smoother sees the history.
+//
+// viewDates is assumed sorted, as every caller's date column already is.
+function smoothWindowed(fitDates, fitValues, viewDates, stdDays) {
+    const sm = gaussianSmooth(fitDates, fitValues, 60, stdDays);
+    if (!viewDates.length || !sm.x.length) return sm;
+
+    const banded = sm.lo && sm.lo.length === sm.x.length;
+    const lo = viewDates[0], hi = viewDates[viewDates.length - 1];
+    const x = [], y = [], loB = [], hiB = [];
+    for (let i = 0; i < sm.x.length; i++) {
+        if (sm.x[i] < lo || sm.x[i] > hi) continue;
+        x.push(sm.x[i]); y.push(sm.y[i]);
+        if (banded) { loB.push(sm.lo[i]); hiB.push(sm.hi[i]); }
+    }
+    return { x, y, lo: banded ? loB : [], hi: banded ? hiB : [] };
 }
 
 // Band colours — the trend line's own hue, so on a panel carrying two series
@@ -421,10 +513,35 @@ function bandExtent(sm) {
     return sm.lo.concat(sm.hi).filter(v => v != null && isFinite(v));
 }
 
+// The readings frame the panel; the band is welcome inside it but does not get
+// to set it. A local line at the newest reading is estimating a slope from half
+// a kernel, so the band flares into a cone there — correctly, and that cone is
+// worth seeing, but left to drive the axis it squashes a month of readings into
+// the top half of the panel to make room for it. So the band may push the frame
+// out by up to half the data's own span on each side, which is generous enough
+// that an ordinary band never clips, and past that it runs off the edge. A band
+// meeting the panel edge reads as "wider than this view" — which is the right
+// thing to understand about it.
+const BAND_ROOM = 0.5;
+
+function yRange(values, sm) {
+    const mn = Math.min(...values), mx = Math.max(...values);
+    const span = mx - mn || 1;
+    const pad = span * 0.08;
+    let lo = mn - pad, hi = mx + pad;
+    const band = sm ? bandExtent(sm) : [];
+    if (band.length) {
+        lo = Math.max(mn - span * BAND_ROOM, Math.min(lo, Math.min(...band)));
+        hi = Math.min(mx + span * BAND_ROOM, Math.max(hi, Math.max(...band)));
+    }
+    return [lo, hi];
+}
+
 // ── 1. Weight chart ────────────────────────────────────
-function renderWeightChart(el, data) {
+function renderWeightChart(el, data, fitData) {
     if (!data.length) { Plotly.purge(el); return; }
 
+    const fit = fitData && fitData.length ? fitData : data;
     const dates = data.map(r => r.date);
     const weights = data.map(r => r.weight);
     const fatPcts = data.map(r => r.fat_percent_cal != null ? r.fat_percent_cal : r.fat_percent);
@@ -435,7 +552,7 @@ function renderWeightChart(el, data) {
     const cmin = validFat.length ? Math.min(...validFat) : 10;
     const cmax = validFat.length ? Math.max(...validFat) : 25;
 
-    const sm = gaussianSmooth(dates, weights);
+    const sm = smoothWindowed(fit.map(r => r.date), fit.map(r => r.weight), dates);
 
     const traces = [
         {
@@ -457,20 +574,25 @@ function renderWeightChart(el, data) {
         },
     ];
 
-    Plotly.newPlot(el, traces, { ...baseLayout(), height: 300 }, CFG);
+    const layout = { ...baseLayout(), height: 300 };
+    layout.yaxis = { ...layout.yaxis, range: yRange(weights, sm) };
+    Plotly.newPlot(el, traces, layout, CFG);
 }
 
 // ── 2. Muscle & Fat chart ──────────────────────────────
-function renderMuscleFatChart(el, data) {
-    data = data.filter(r => r.fat_lbs != null && r.muscle_lbs != null);
+function renderMuscleFatChart(el, data, fitData) {
+    const hasBoth = r => r.fat_lbs != null && r.muscle_lbs != null;
+    data = data.filter(hasBoth);
     if (!data.length) { Plotly.purge(el); return; }
+    const fit = (fitData && fitData.length ? fitData : data).filter(hasBoth);
 
     const dates = data.map(r => r.date);
     const muscle = data.map(r => r.muscle_lbs);
     const fat = data.map(r => r.fat_lbs);
 
-    const smM = gaussianSmooth(dates, muscle);
-    const smF = gaussianSmooth(dates, fat);
+    const fitDates = fit.map(r => r.date);
+    const smM = smoothWindowed(fitDates, fit.map(r => r.muscle_lbs), dates);
+    const smF = smoothWindowed(fitDates, fit.map(r => r.fat_lbs), dates);
 
     const mkMarker = () => ({ size: 14, color: 'slateblue', opacity: 1, line: { width: 0.5, color: 'white' } });
 
@@ -525,23 +647,20 @@ function renderMuscleFatChart(el, data) {
         });
     }
 
-    const pad = (arr) => {
-        const mn = Math.min(...arr), mx = Math.max(...arr), p = (mx - mn) * 0.08;
-        return [mn - p, mx + p];
-    };
     // Anchors join the fat axis range so a scan can never land off-screen — an
     // invisible anchor is worse than no anchor, since the panel would then look
-    // like agreement it hasn't demonstrated.
-    const fatSpan = fat.concat(anchors.map(a => a.fat_lbs), bandExtent(smF));
+    // like agreement it hasn't demonstrated. They are readings, not band, so
+    // they set the frame rather than merely being allowed into it.
+    const fatSpan = fat.concat(anchors.map(a => a.fat_lbs));
 
     const layout = {
         ...baseLayout(), height: 600, showlegend: false,
         margin: { l: 48, r: 16, t: 20, b: 28 },
         grid: { rows: 2, columns: 1, subplots: [['xy'], ['x2y2']], roworder: 'top to bottom' },
         xaxis: { ...AXIS },
-        yaxis: { ...AXIS, range: pad(muscle.concat(bandExtent(smM))), title: { text: 'pounds', font: { size: 11 } } },
+        yaxis: { ...AXIS, range: yRange(muscle, smM), title: { text: 'pounds', font: { size: 11 } } },
         xaxis2: { ...AXIS, matches: 'x' },
-        yaxis2: { ...AXIS, range: pad(fatSpan), title: { text: 'pounds', font: { size: 11 } } },
+        yaxis2: { ...AXIS, range: yRange(fatSpan, smF), title: { text: 'pounds', font: { size: 11 } } },
         annotations: [
             { text: 'Muscle', xref: 'paper', yref: 'paper', x: 0.5, y: 1, showarrow: false,
               font: { size: 12, color: '#6b7280' }, xanchor: 'center', yanchor: 'bottom' },
@@ -623,9 +742,10 @@ const SERIES_B = '#1f9e89';  // teal — validated ΔE 19.6 (deutan) vs SERIES_A
 // dense: measured every few days, worth a Gaussian trend line. Sparse monthly
 // sites get a plain connector instead — smoothing 6 points invents a curve that
 // isn't there.
-function renderCircumferenceChart(el, tapeRows, key, label, dense) {
+function renderCircumferenceChart(el, tapeRows, key, label, dense, fitRows) {
     const rows = tapeRows.filter(r => r[key] != null);
     if (!rows.length) { Plotly.purge(el); return; }
+    const fit = (fitRows && fitRows.length ? fitRows : tapeRows).filter(r => r[key] != null);
 
     const x = rows.map(r => r.date);
     const y = rows.map(r => r[key]);
@@ -640,6 +760,7 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
         hoverlabel: HOVERLABEL, showlegend: false,
     }];
 
+    let smTrend = null;
     if (dense && rows.length >= 3) {
         // Tighter than the weight smoother: waist is low-noise, so a 90/20
         // kernel would flatten exactly the change we're looking for.
@@ -649,7 +770,8 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
         // band — it is the only lever on the physiological half of the noise —
         // but at the cost of a staler line, and the point of measuring more
         // often was to see change sooner, not to average over more of it.
-        const sm = gaussianSmooth(x, y, 60, 14);
+        const sm = smoothWindowed(fit.map(r => r.date), fit.map(r => r[key]), x, 14);
+        smTrend = sm;
         traces.push(...bandTraces(sm, BAND_TREND));
         traces.push({
             x: sm.x, y: sm.y, mode: 'lines',
@@ -661,6 +783,7 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
     const layout = {
         ...baseLayout(), height: 250, showlegend: false,
         margin: { l: 48, r: 16, t: 22, b: 28 },
+        yaxis: { ...AXIS, range: yRange(y, dense && rows.length >= 3 ? smTrend : null) },
         annotations: [
             { text: `${label} (inches)`, xref: 'paper', yref: 'paper', x: 0.5, y: 1,
               showarrow: false, font: { size: 12, color: '#6b7280' },
@@ -679,12 +802,17 @@ function renderCircumferenceChart(el, tapeRows, key, label, dense) {
 // for lean muscular builds, so the two lines are NOT expected to coincide —
 // what matters is whether the gap between them stays constant. A widening gap
 // means the BIA extrapolation is going off.
-function renderNavyChart(el, navyRows, calibrated) {
+function renderNavyChart(el, navyRows, calibrated, fitNavy, fitCal) {
     if (!navyRows.length) { Plotly.purge(el); return; }
 
     const bia = calibrated.filter(r => r.fat_percent_cal != null);
-    const smNavy = gaussianSmooth(navyRows.map(r => r.date),
-                                  navyRows.map(r => r.fat_percent), 60, 14);
+    const fitB = (fitCal && fitCal.length ? fitCal : calibrated)
+        .filter(r => r.fat_percent_cal != null);
+    const fitN = fitNavy && fitNavy.length ? fitNavy : navyRows;
+
+    const navyDates = navyRows.map(r => r.date);
+    const smNavy = smoothWindowed(fitN.map(r => r.date),
+                                  fitN.map(r => r.fat_percent), navyDates, 14);
     // Scatter in the readings only. The calibration itself rests on four anchors
     // and is extrapolating past the heaviest of them; that uncertainty is not in
     // this band, which says how well the scale agrees with itself, not how close
@@ -692,7 +820,8 @@ function renderNavyChart(el, navyRows, calibrated) {
     // lines is holding steady — overlapping bands here would mean the gap is
     // within noise, not that the two methods agree.
     const smBia = bia.length
-        ? gaussianSmooth(bia.map(r => r.date), bia.map(r => r.fat_percent_cal))
+        ? smoothWindowed(fitB.map(r => r.date), fitB.map(r => r.fat_percent_cal),
+                         bia.map(r => r.date))
         : null;
 
     const traces = [
@@ -726,7 +855,11 @@ function renderNavyChart(el, navyRows, calibrated) {
         legend: { orientation: 'h', x: 0.5, xanchor: 'center', y: 1.02, yanchor: 'bottom',
                   font: { size: 11 } },
         margin: { l: 48, r: 16, t: 34, b: 28 },
-        yaxis: { ...AXIS, title: { text: '% fat', font: { size: 11 } } },
+        yaxis: { ...AXIS, title: { text: '% fat', font: { size: 11 } },
+                 range: yRange(navyRows.map(r => r.fat_percent)
+                                   .concat(bia.map(r => r.fat_percent_cal)),
+                               { lo: bandExtent(smNavy).concat(smBia ? bandExtent(smBia) : []),
+                                 hi: [] }) },
     };
 
     Plotly.newPlot(el, traces, layout, CFG);
