@@ -88,15 +88,46 @@ function t95(df) {
 // is never penalised for a dense era's stickiness.
 //
 // p and the noise level both come from a VARIOGRAM on the raw readings, not
-// from the fit's residuals. For a pair d days apart, E[(y2-y1)²]/2 =
-// sigma²(1-p^d) — two lags identify both quantities, and a real trend
-// contributes only (slope·d)², which is nothing across one or two days. This
-// matters: residuals are the wrong instrument here, because the smoother
-// absorbs exactly the low-frequency wiggle that autocorrelation creates. In
-// simulation, residuals recover p = 0.42 and sigma = 0.84 from a series built
-// with p = 0.6 and sigma = 1.0, and the two errors compound into a band with
-// 82% coverage instead of 95%.
-const VARIO_MIN_PAIRS = 15;  // per lag; below this the variogram is noise
+// from the fit's residuals. Residuals are the wrong instrument here, because
+// the smoother absorbs exactly the low-frequency wiggle that autocorrelation
+// creates: they recover p = 0.42 and sigma = 0.84 from a series built with
+// p = 0.6 and sigma = 1.0, and the two errors compound into 82% coverage.
+//
+// The variogram is fitted with a NUGGET, which is what the measurements
+// actually look like:
+//
+//     gamma(d) = nugget + sill·(1 - p^d)
+//
+// The nugget is per-session error — tape placement, scale variation, standing
+// a little differently — which is independent every time and averages away
+// like ordinary noise. The sill is the part that persists: water, glycogen,
+// gut content, which are genuinely the same tomorrow as today and do NOT
+// average away no matter how often you measure inside their memory. Only the
+// sill gets the AR(1) inflation; the nugget is divided by n_eff as usual.
+//
+// Fitting the two as one AR(1) instead gets both badly wrong. On a waist
+// series that is half tape error and half physiology with p = 0.7, the
+// two-parameter fit reports p = 0.24 AND understates total variance by 26%,
+// for 75% coverage on daily readings — worse than doing nothing.
+//
+// Trend leaks into gamma as (slope·d)², so only short lags are usable. At the
+// 8-day cap that is a few percent of a typical waist variance, and it biases
+// the band wider rather than narrower.
+const VARIO_MIN_PAIRS = 15;  // per lag; below this that lag is noise
+const VARIO_MAX_LAG = 8;     // days; beyond this trend contaminates gamma
+const VARIO_MIN_LAGS = 3;    // three parameters need three lags to pin down
+// With plenty of lags the fit can be second-guessed: a persistent component is
+// adopted only if it cuts residual error by this share against a flat,
+// nugget-only variogram, which stops three parameters chasing the sampling
+// noise in gamma. Below VARIO_JUDGE_LAGS there is no spare degrees of freedom
+// to run that test on, and the fit stands unchallenged — deliberately, because
+// the two ways of being wrong are not symmetric. Missing real persistence
+// understates the band, which is the failure that misleads; imagining some
+// only widens it. Nothing a body measures is truly independent day to day
+// anyway, so the unchallenged case errs in the direction that is merely
+// cautious.
+const VARIO_JUDGE_LAGS = 6;
+const VARIO_SHAPE_GAIN = 0.5;
 const AR_RHO_MAX = 0.85;     // cap: beyond here the inflation runs away
 
 // First index of ts at or after t. ts is sorted ascending.
@@ -147,15 +178,20 @@ function movingAverage(arr, halfWidth) {
     });
 }
 
-// Noise level and day-to-day persistence, read off the variogram at lags 1 and
-// 2 days. Returns null when the series is too sparse for either lag to have
-// enough pairs — weekly tape readings, for instance, where daily persistence is
-// both unmeasurable and irrelevant, since p^7 is already negligible.
+// Splits the noise into its independent and its persistent halves by fitting
+// gamma(d) = nugget + sill·(1 - p^d) to the empirical variogram.
+//
+// Returns null when the series is too sparse to pin down three parameters from
+// short lags — weekly tape readings, for instance, whose only lags are 7 and
+// 14. That fallback is sound rather than merely safe: at 7-day spacing p^7 is
+// already negligible, so there is nothing for the correction to do, and weekly
+// series measure 94-96% coverage with it switched off.
 function noiseFromVariogram(dayIdx, vals) {
     const by = new Map();
     dayIdx.forEach((d, i) => by.set(d, vals[i]));
 
-    const semi = (lag) => {
+    const lags = [], gamma = [];
+    for (let lag = 1; lag <= VARIO_MAX_LAG; lag++) {
         let sum = 0, pairs = 0;
         for (let i = 0; i < dayIdx.length; i++) {
             const other = by.get(dayIdx[i] + lag);
@@ -163,14 +199,49 @@ function noiseFromVariogram(dayIdx, vals) {
             const diff = other - vals[i];
             sum += diff * diff; pairs++;
         }
-        return pairs >= VARIO_MIN_PAIRS ? sum / (2 * pairs) : null;
-    };
+        if (pairs >= VARIO_MIN_PAIRS) { lags.push(lag); gamma.push(sum / (2 * pairs)); }
+    }
+    if (lags.length < VARIO_MIN_LAGS) return null;
 
-    const g1 = semi(1), g2 = semi(2);
-    if (!g1 || !g2 || g1 <= 0) return null;
-    // g2/g1 = (1-p²)/(1-p) = 1+p
-    const rho = Math.min(AR_RHO_MAX, Math.max(0, g2 / g1 - 1));
-    return { rho, variance: g1 / (1 - rho) };
+    // Nonlinear in p but LINEAR in (nugget, sill) once p is fixed, so walk a
+    // grid of p and solve the 2x2 normal equations at each. Negative variances
+    // are refitted on the boundary rather than returned.
+    let best = null;
+    for (let k = 0; k <= 60; k++) {
+        const rho = (k / 60) * AR_RHO_MAX;
+        let s11 = 0, s12 = 0, s22 = 0, b1 = 0, b2 = 0;
+        for (let i = 0; i < lags.length; i++) {
+            const x = 1 - Math.pow(rho, lags[i]), y = gamma[i];
+            s11 += 1; s12 += x; s22 += x * x; b1 += y; b2 += x * y;
+        }
+        const det = s11 * s22 - s12 * s12;
+        if (Math.abs(det) < 1e-15) continue;
+        let nugget = (s22 * b1 - s12 * b2) / det;
+        let sill = (s11 * b2 - s12 * b1) / det;
+        if (nugget < 0) { nugget = 0; sill = s22 > 0 ? b2 / s22 : 0; }
+        if (sill < 0) { sill = 0; nugget = b1 / s11; }
+        if (nugget < 0 || sill < 0) continue;
+
+        let sse = 0;
+        for (let i = 0; i < lags.length; i++) {
+            const r = gamma[i] - (nugget + sill * (1 - Math.pow(rho, lags[i])));
+            sse += r * r;
+        }
+        if (!best || sse < best.sse) best = { sse, rho, nugget, sill };
+    }
+    if (!best || best.nugget + best.sill <= 0) return null;
+
+    let flat = 0;
+    for (let i = 0; i < gamma.length; i++) flat += gamma[i];
+    flat /= gamma.length;
+    let sse0 = 0;
+    for (let i = 0; i < gamma.length; i++) sse0 += (gamma[i] - flat) * (gamma[i] - flat);
+    if (lags.length >= VARIO_JUDGE_LAGS && best.sse > sse0 * (1 - VARIO_SHAPE_GAIN)) {
+        return flat > 0 ? { rho: 0, nugget: flat, sill: 0, variance: flat } : null;
+    }
+
+    return { rho: best.rho, nugget: best.nugget, sill: best.sill,
+             variance: best.nugget + best.sill };
 }
 
 // stdDays: pass a number to pin the bandwidth; omit it to adapt to density.
@@ -280,8 +351,16 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
         xs.push(tape.localDateStr(new Date(t)));
         ys.push(fit[i]);
         if (sc > 0) {
+            // Only the persistent half of the noise is floored by
+            // autocorrelation. The nugget averages down with n_eff like any
+            // independent error, so the effective inflation is a blend of the
+            // two — it collapses to 1 for pure tape error and to the full
+            // AR(1) factor for pure physiology.
             const ph = Math.pow(rho, Math.max(1, spacing[i]));
-            const inflate = (1 + ph) / (1 - ph);
+            const arFactor = (1 + ph) / (1 - ph);
+            const inflate = noise
+                ? (noise.nugget + noise.sill * arFactor) / noise.variance
+                : 1;
             // n_eff readings under the kernel, one of them spent on the local
             // mean the residuals are measured against.
             const nEff = sumW[i] * sumW[i] / sumW2[i];
