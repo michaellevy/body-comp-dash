@@ -110,11 +110,17 @@ function t95(df) {
 // two-parameter fit reports p = 0.24 AND understates total variance by 26%,
 // for 75% coverage on daily readings — worse than doing nothing.
 //
-// Trend leaks into gamma as (slope·d)², so only short lags are usable. At the
-// 8-day cap that is a few percent of a typical waist variance, and it biases
-// the band wider rather than narrower.
+// Trend leaks into gamma as (slope·d)²/2, growing quadratically, so only short
+// lags are usable. The 12-day cap keeps that under a fifth of a typical waist
+// variance, and what does leak biases the band wider rather than narrower.
+//
+// The cap has to clear the measurement cadence with room for several multiples
+// of it, which is why it is not tighter. A site measured every three days
+// yields pairs at lags 3, 6, 9 and 12 and nothing in between: cap at 8 and only
+// two lags survive, three parameters go unidentified, and the correction
+// silently switches off at the exact cadence chosen to make the band tighter.
 const VARIO_MIN_PAIRS = 15;  // per lag; below this that lag is noise
-const VARIO_MAX_LAG = 8;     // days; beyond this trend contaminates gamma
+const VARIO_MAX_LAG = 12;    // days; beyond this trend contaminates gamma
 const VARIO_MIN_LAGS = 3;    // three parameters need three lags to pin down
 // With plenty of lags the fit can be second-guessed: a persistent component is
 // adopted only if it cuts residual error by this share against a flat,
