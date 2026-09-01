@@ -203,9 +203,12 @@ function localSpacingDays(ts, t, k) {
 
 // How much the variance is inflated at this spacing by persistence in the
 // noise. 1 when the noise is all independent per-session error, rising toward
-// the full AR(1) factor when it is all physiology. Used twice, and it has to be
-// the same number both times: once to widen the bandwidth so the inflation is
-// paid for in data, and once on what inflation is left over after that.
+// the full AR(1) factor when it is all physiology.
+//
+// This is the SCALAR approximation, and it is used only to choose the
+// bandwidth, which has to be decided before there are any weights to be exact
+// about. The variance itself is computed exactly further down, because the
+// scalar is wrong in the one place it matters most — see varianceFactor.
 function arInflation(noise, spacingDays) {
     if (!noise || !noise.rho) return 1;
     const ph = Math.pow(noise.rho, Math.max(1, spacingDays));
@@ -339,6 +342,16 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     const sigmas = movingAverage(
         rawSpacing.map((sp, i) => sigmaFor(sp, inflations[i], stdDays)), SIGMA_BLEND);
 
+    // Consecutive-gap decay, precomputed: rho^(gap in days) for each adjacent
+    // pair of readings. Depends only on the readings, not on the output day.
+    const rho = noise ? noise.rho : 0;
+    const rhoStep = new Float64Array(pts.length);
+    if (rho > 0) {
+        for (let j = 1; j < pts.length; j++) {
+            rhoStep[j] = Math.pow(rho, (ts[j] - ts[j - 1]) / dayMs);
+        }
+    }
+
     // Pass 1 — the fit.
     //
     // The local line makes every output day a weighted least squares of two
@@ -349,6 +362,7 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     const fit = new Float64Array(nDays);
     const selfW = new Float64Array(nDays);   // l of a reading on its own day
     const sumL2 = new Float64Array(nDays);   // SUM l², the reciprocal of n_eff
+    const varFac = new Float64Array(nDays);  // variance factor, correlation and all
     const lo = new Int32Array(nDays), hi = new Int32Array(nDays);
     const ok = new Uint8Array(nDays);
     const wbuf = new Float64Array(pts.length);   // kernel weights, reused per day
@@ -373,15 +387,39 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
         const den = s0 * s2 - s1 * s1;
         const linear = den > 1e-9 * s0 * s2;
 
-        let f = 0, sl2 = 0;
+        // Var(fit) is the quadratic form SUM_i SUM_j l_i·l_j·C(|t_i - t_j|). With
+        // an exponential C that double sum telescopes: S_i, the discounted
+        // running total of the weights before i, satisfies
+        // S_i = rho^gap · (S_{i-1} + l_{i-1}), so one forward pass gets it.
+        //
+        // Doing it exactly rather than as SUM l² times a scalar inflation
+        // matters at the boundary and only there. A local line fitted to half a
+        // kernel puts NEGATIVE weight on its far readings — that is how it
+        // reads a slope — and negative weights on positively correlated
+        // neighbours cancel variance that a scalar multiplier cannot see. The
+        // scalar predicted the band at today inflating 2.50x over the interior
+        // where the fit's true spread only inflates 2.13x, which is most of why
+        // coverage there ran to 98% instead of 95%.
+        let f = 0, sl2 = 0, cross = 0, S = 0, lPrev = 0;
         for (let j = a; j < b; j++) {
             const u = (ts[j] - t) / dayMs;
             const l = linear ? wbuf[j] * (s2 - s1 * u) / den : wbuf[j] / s0;
             f += l * pts[j].v;
             sl2 += l * l;
+            if (rho > 0) {
+                if (j > a) S = rhoStep[j] * (S + lPrev);
+                cross += l * S;
+                lPrev = l;
+            }
         }
         fit[i] = f; sumL2[i] = sl2; ok[i] = 1;
         selfW[i] = linear ? s2 / den : 1 / s0;
+        // Normalised by the marginal variance, so it multiplies the local sigma²
+        // estimate directly. Falls back to SUM l² — the independent-noise
+        // answer — when there is no fitted noise model.
+        varFac[i] = noise
+            ? (noise.nugget * sl2 + noise.sill * (sl2 + 2 * cross)) / noise.variance
+            : sl2;
     }
 
     // Pass 2 — residuals about the fit. Every reading falls on a grid day
@@ -436,13 +474,6 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
         xs.push(tape.localDateStr(new Date(t)));
         ys.push(fit[i]);
         if (sc > 0) {
-            // Only the persistent half of the noise is floored by
-            // autocorrelation. The nugget averages down with n_eff like any
-            // independent error, so the effective inflation is a blend of the
-            // two — it collapses to 1 for pure tape error and to the full
-            // AR(1) factor for pure physiology. The bandwidth was widened by
-            // this same factor above, which is what pays for it.
-            const inflate = inflations[i];
             // Two different effective counts, and they are not interchangeable.
             //
             // SUM l² sets how precise the FIT is — at the right edge the local
@@ -458,8 +489,7 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
             // it at 3, and roughly doubled the band over what the data
             // supported (99-100% coverage where 95% was asked for).
             const dfVar = sw * sw / sw2 - 2;
-            const half = t95(dfVar)
-                       * Math.sqrt((sr / sc) * scale * inflate * sumL2[i]);
+            const half = t95(dfVar) * Math.sqrt((sr / sc) * scale * varFac[i]);
             loBand.push(fit[i] - half);
             hiBand.push(fit[i] + half);
         } else {
