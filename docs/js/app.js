@@ -4,10 +4,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     // ── Tabs ───────────────────────────────────────────
     document.querySelectorAll('.tab').forEach(tab => {
         tab.addEventListener('click', () => {
+            // Re-tapping the tab you're already on used to rebuild the log form
+            // from scratch. The draft below survives that now, but there's still
+            // no reason to tear down a form mid-entry and take the keyboard
+            // with it, so a no-op tap stays a no-op.
+            const pane = document.getElementById(tab.dataset.target);
+            if (pane.classList.contains('active')) return;
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
-            document.getElementById(tab.dataset.target).classList.add('active');
+            pane.classList.add('active');
             if (tab.dataset.target === 'log-tab') { refreshRecent(); refreshTapeDue(); }
             if (tab.dataset.target === 'charts-tab') refreshCharts();
         });
@@ -74,6 +80,110 @@ document.addEventListener('DOMContentLoaded', async () => {
     const dateInput = document.getElementById('input-date');
     dateInput.value = tape.todayStr();
 
+    // ── Unsaved draft ──────────────────────────────────
+    // Everything typed into the log form is mirrored to localStorage until the
+    // save lands. Two things used to eat an entry in progress. The tape block is
+    // rebuilt with innerHTML on every re-render — the "measure something else"
+    // toggle, a tab tap, a cloud sync finishing while you type — and each
+    // rebuild dropped whatever was sitting in the fields; and an iOS PWA evicted
+    // while backgrounded comes back with an empty form. A tape reading can't be
+    // reconstructed once the tape is off and you've eaten breakfast, so it lives
+    // here from the first keystroke rather than from the Save tap.
+    //
+    // A draft is never aged out. An expiry would just be a slower version of
+    // the bug being fixed here, and it isn't needed: the draft carries the date
+    // it was typed under, so an old one comes back filed under its own day
+    // rather than today's, and the notice says so.
+    const DRAFT_KEY = 'entry_draft';
+    const draftNotice = document.getElementById('draft-notice');
+    const draftNoticeText = document.getElementById('draft-notice-text');
+    let draft = {};
+
+    // The date is always populated, so it doesn't count as something to keep.
+    function draftHasValues() {
+        return Object.entries(draft).some(([k, v]) => k !== 'date' && v !== '' && v != null);
+    }
+
+    // Mirror the live form into the draft. Runs on every keystroke and again
+    // before every rebuild, so the stored copy is never behind the screen.
+    function captureDraft() {
+        draft.date = dateInput.value;
+        draft.weight = document.getElementById('input-weight').value;
+        draft.fat = document.getElementById('input-fat').value;
+        document.querySelectorAll('.tape-input').forEach(inp => {
+            draft[inp.dataset.site] = inp.value;
+        });
+        try {
+            if (draftHasValues()) {
+                localStorage.setItem(DRAFT_KEY, JSON.stringify({ fields: draft }));
+            } else {
+                localStorage.removeItem(DRAFT_KEY);
+            }
+        } catch (e) {
+            console.warn('Draft save failed:', e.message);
+        }
+    }
+
+    function clearDraft() {
+        draft = {};
+        localStorage.removeItem(DRAFT_KEY);
+        draftNotice.style.display = 'none';
+    }
+
+    // Blank the fields as well as the stored draft: refreshTapeDue mirrors the
+    // live form into the draft before it rebuilds, so a field left filled would
+    // put itself straight back.
+    function clearForm() {
+        document.getElementById('input-weight').value = '';
+        document.getElementById('input-fat').value = '';
+        document.querySelectorAll('.tape-input').forEach(inp => { inp.value = ''; });
+        clearDraft();
+    }
+
+    // Only the fixed fields are filled here; the tape fields pick their values
+    // up from `draft` the next time refreshTapeDue renders them.
+    function restoreDraft() {
+        let stored = null;
+        try {
+            stored = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+        } catch (e) { /* a corrupt draft is the same as no draft */ }
+        if (!stored || !stored.fields) return;
+        draft = stored.fields;
+        if (!draftHasValues()) { clearDraft(); return; }
+        if (draft.date) dateInput.value = draft.date;
+        if (draft.weight) document.getElementById('input-weight').value = draft.weight;
+        if (draft.fat) document.getElementById('input-fat').value = draft.fat;
+
+        // Say so rather than silently repopulating — a form that fills itself in
+        // reads as a bug when you don't know why. Name the day when it isn't
+        // today's, so a stale draft can't quietly file a reading under the
+        // wrong date just because it was still sitting in the form.
+        let msg = 'Unsaved entry restored.';
+        if (draft.date && draft.date !== tape.todayStr()) {
+            const d = new Date(draft.date + 'T00:00:00');
+            msg = `Unsaved entry restored, dated ${d.toLocaleDateString('en-US',
+                { month: 'short', day: 'numeric' })}.`;
+        }
+        draftNoticeText.textContent = msg;
+        draftNotice.style.display = '';
+    }
+
+    // Both events: Safari doesn't reliably fire `input` when a date is picked
+    // from the wheel, and `change` alone would miss every keystroke elsewhere.
+    ['input-date', 'input-weight', 'input-fat'].forEach(id => {
+        const el = document.getElementById(id);
+        el.addEventListener('input', captureDraft);
+        el.addEventListener('change', captureDraft);
+    });
+
+    document.getElementById('draft-discard').addEventListener('click', () => {
+        clearForm();
+        dateInput.value = tape.todayStr();
+        refreshTapeDue();
+    });
+
+    restoreDraft();
+
     // ── Save ───────────────────────────────────────────
     document.getElementById('save-btn').addEventListener('click', async () => {
         const weight = document.getElementById('input-weight').value;
@@ -96,14 +206,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const dt = dateInput.value || tape.todayStr();
 
+        // The form is only emptied once the write has actually landed. A save
+        // that failed silently and cleared the fields anyway would be the same
+        // loss this whole draft mechanism exists to prevent.
         const parts = [];
-        if (weight) {
-            await db.saveMeasurement(dt, weight, fat || null);
-            parts.push(`${weight} lbs${fat ? `, ${fat}% fat` : ''}`);
+        try {
+            if (weight) {
+                await db.saveMeasurement(dt, weight, fat || null);
+                parts.push(`${weight} lbs${fat ? `, ${fat}% fat` : ''}`);
+            }
+            if (tapeKeys.length && await db.saveTape(dt, tapeValues)) {
+                parts.push(tapeKeys.map(k => `${k} ${tapeValues[k]}"`).join(', '));
+            }
+        } catch (e) {
+            feedback.textContent = `Save failed (${e.message}) — your entry is still here, try again.`;
+            feedback.className = 'err';
+            return;
         }
-        if (tapeKeys.length) {
-            await db.saveTape(dt, tapeValues);
-            parts.push(tapeKeys.map(k => `${k} ${tapeValues[k]}"`).join(', '));
+        if (!parts.length) {
+            feedback.textContent = 'Nothing was saved — check the values.';
+            feedback.className = 'err';
+            return;
         }
 
         const d = new Date(dt + 'T00:00:00');
@@ -111,8 +234,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         feedback.textContent = `Saved ${mon} — ${parts.join(' · ')}`;
         feedback.className = 'ok';
 
-        document.getElementById('input-weight').value = '';
-        document.getElementById('input-fat').value = '';
+        clearForm();
         showResting = false;
         await refreshTapeDue();
 
@@ -166,9 +288,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         const due = tape.dueSites(rows);
         const resting = tape.restingSites(rows);
 
+        // The rebuild below throws the fields away, so take what's in them
+        // first — including the one being typed into right now.
+        captureDraft();
+        const active = document.activeElement;
+        const activeId = active && active.classList.contains('tape-input') ? active.id : null;
+
+        const drafted = site => draft[site.key] != null && draft[site.key] !== '';
+
+        // A site you've typed into stays on screen even when it's off-schedule
+        // and the list is collapsed: hiding the off-schedule sites is a tidying
+        // gesture, and it must never be a way to lose a reading.
+        const visible = showResting ? due.concat(resting)
+                                    : due.concat(resting.filter(drafted));
         // Nothing is on offer only if every site is showing already.
-        const showToggle = resting.length > 0;
-        const visible = showResting ? due.concat(resting) : due;
+        const showToggle = showResting ? resting.length > 0 : resting.some(s => !drafted(s));
 
         const parts = [`<div class="tape-block-header">Tape measure</div>`];
         if (visible.length) {
@@ -185,6 +319,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         el.innerHTML = `<div class="tape-block">${parts.join('')}</div>`;
+
+        // Values go on after the rebuild rather than into the markup: innerHTML
+        // discards whatever was typed, and this is what puts it back.
+        el.querySelectorAll('.tape-input').forEach(inp => {
+            const v = draft[inp.dataset.site];
+            if (v != null && v !== '') inp.value = v;
+            inp.addEventListener('input', captureDraft);
+        });
+        // A rebuild that lands mid-keystroke — a sync finishing, a stray tap —
+        // shouldn't close the keyboard on you either.
+        if (activeId) {
+            const again = document.getElementById(activeId);
+            if (again) again.focus();
+        }
 
         const moreBtn = document.getElementById('tape-more-btn');
         if (moreBtn) {

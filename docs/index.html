@@ -23,6 +23,12 @@
     <!-- Log Tab -->
     <div id="log-tab" class="tab-content active">
         <div class="card" style="padding:20px">
+            <!-- Shown when the form comes back pre-filled from an unsaved draft -->
+            <div id="draft-notice" class="draft-notice" style="display:none">
+                <span id="draft-notice-text">Unsaved entry restored.</span>
+                <button type="button" id="draft-discard">Discard</button>
+            </div>
+
             <label for="input-date">Date</label>
             <input type="date" id="input-date" class="mb">
 
