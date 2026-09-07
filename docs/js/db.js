@@ -203,6 +203,17 @@ const MORNING_CUTOFF = '2026-08-14';
 const FIRST_MORNING_WAIST = { date: '2026-08-14', waist: 36.625 };
 const SEED_FLAG = 'fix_waist_morning_seeded';
 
+// ── One-time data fix: discard an errant thigh reading ─────────────────────
+// The 2026-09-05 thigh value doesn't sit on the series — it reads as a tape
+// placement miss, not a real change. Thigh is measured weekly now, so a single
+// bad point carries real weight in a short cut-length series and is worth
+// removing rather than waiting for the trend to bury it.
+//
+// Like the waist scrub, this runs on every load: another device still holding
+// the row can push it back to the gist, and re-running costs nothing once the
+// value is gone.
+const ERRANT_THIGH_DATES = ['2026-09-05'];
+
 async function stripField(dates, field) {
     const db = await openDB();
     return new Promise((resolve, reject) => {
@@ -230,15 +241,19 @@ async function applyDataFixes() {
     const seed = !localStorage.getItem(SEED_FLAG)
         && !rows.some(r => r.date === FIRST_MORNING_WAIST.date && r.waist != null);
 
+    const errantThigh = rows.filter(
+        r => ERRANT_THIGH_DATES.includes(r.date) && r.thigh != null);
+
     if (stale.length) await stripField(stale.map(r => r.date), 'waist');
+    if (errantThigh.length) await stripField(errantThigh.map(r => r.date), 'thigh');
     if (seed) {
         await localMerge({ ...FIRST_MORNING_WAIST }, TAPE_STORE);
         localStorage.setItem(SEED_FLAG, '1');
     }
-    if (!stale.length && !seed) return 0;
+    if (!stale.length && !errantThigh.length && !seed) return 0;
 
     gistPush().catch(e => console.warn('Gist push failed (will retry on next save):', e.message));
-    return stale.length + (seed ? 1 : 0);
+    return stale.length + errantThigh.length + (seed ? 1 : 0);
 }
 
 async function getAllMeasurements() {

@@ -611,8 +611,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         charts.renderMuscleFatChart('muscle-fat-chart', cal, calAll);
         renderPath(null);
 
-        // Waist is measured every few days, so it earns a smoothed trend; the
-        // monthly sites are too sparse for smoothing and get a plain connector.
+        // Waist is measured every few days, so it earns a smoothed trend. The
+        // weekly and monthly sites are too sparse for smoothing and get a
+        // plain connector.
         [
             ['waist-chart', 'waist', 'Waist', true],
             ['bicep-chart', 'bicep', 'Bicep', false],

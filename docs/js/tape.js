@@ -1,10 +1,17 @@
 // Tape measurements — site definitions, due logic, Navy fat% estimate.
 //
 // Cadence rationale: waist is the only site precise enough to resolve change
-// inside a few days. Bicep and thigh move a few mm per YEAR of real
-// hypertrophy, which is smaller than session-to-session tape error — measuring
-// them weekly would record noise, so they're monthly. Neck is monthly because
-// it drifts slowly with weight; a one-time value would go stale.
+// inside a few days. Bicep moves a few mm per YEAR of real hypertrophy, which
+// is smaller than session-to-session tape error — measuring it weekly would
+// record noise, so it stays monthly. Neck is monthly because it drifts slowly
+// with weight; a one-time value would go stale.
+//
+// Thigh is weekly, and the reason is the cut rather than hypertrophy. Girth
+// there tracks fat loss at roughly the rate weight comes off, which is an
+// order of magnitude faster than the growth cadence was built around, so a
+// week's change clears tape error where a week of training would not. It is
+// still a noisy site: read the trend across several weeks, not one reading
+// against the last.
 //
 // Waist runs every three days rather than weekly, which buys about a quarter
 // off the width of its confidence band. Two things bound that gain, and both
@@ -34,7 +41,7 @@ const TAPE_SITES = [
       cue: 'Just below the Adam’s apple, tape sloping slightly downward at the front. Shoulders relaxed.' },
     { key: 'bicep', label: 'Bicep', intervalDays: 30,
       cue: 'Right arm, hanging relaxed at your side — not flexed. Halfway between shoulder bone and elbow.' },
-    { key: 'thigh', label: 'Thigh', intervalDays: 30,
+    { key: 'thigh', label: 'Thigh', intervalDays: 7,
       cue: 'Right leg, 6 in above the top of the kneecap. Stand with weight even on both feet.' },
 ];
 
