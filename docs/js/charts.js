@@ -79,6 +79,137 @@ const SIGMA_SPAN = 6;    // sigma spans about this many typical gaps
 const NEIGHBORS = 10;    // readings used to estimate local spacing
 const SIGMA_BLEND = 21;  // days — sigma is itself smoothed over this half-width
 
+// ── Robustness: readings the trend should not have to follow ─────────────────
+// Least squares hands a wild reading its full weight and the local line bends
+// to meet it. That is the wrong answer for this series: a fat% excursion the
+// morning after a long hike is the scale reporting hydration, not a body that
+// changed overnight — the implied lean mass moved 7.9 lbs in two days, which no
+// tissue does.
+//
+// Worse, such a reading tends to arrive at the RIGHT EDGE, because the newest
+// one always does. That is where half the kernel hangs off the end of the data
+// and a single point carries its maximum leverage on the fitted slope. The tip
+// of the trend line is the part actually read, and it was the part least
+// defended: the 15.2% on 2026-09-10 pulled the fitted tip down 1.02 pp and
+// widened the band there by 76%.
+//
+// So readings are screened before the fit and carry a weight into it, Tukey
+// biweight, zero for the ones that fail. The reading still PLOTS, sitting
+// visibly outside the band — the honest rendering, since the measurement
+// happened and the trend does not believe it. No date is hardcoded and no row
+// is deleted, so the next hike is handled without a commit.
+//
+// ── What the reading is judged against ───────────────────────────────────────
+// Its deviation from the MEDIAN OF ITS CLOSE NEIGHBOURS — not its residual from
+// the trend line. That distinction is the whole difference between this working
+// and this quietly eating data.
+//
+// Residuals will not do the job, because this smoother is deliberately wide.
+// Weight noise is sticky (rho 0.85), so the bandwidth inflates to SIGMA_MAX to
+// buy back the independence, and a 45-day local line cannot turn fast. Through
+// the nine-pound fortnight of late 2023 the fit sat at 168.6 while the readings
+// were at 163.4, so residuals ran to 5 lbs on data that was never in doubt:
+// 163.6 and 163.4 on 2023-12-01 and 12-03 agree with each other and with the
+// 164-166 on either side. That is smoothing bias, and rejecting readings for it
+// is exactly backwards. A trend-dominated residual cannot answer the question.
+//
+// A reading's gap to its immediate neighbours can, because the comparison is
+// made over days rather than months and any trend is carried by the neighbours
+// too. Under the same December drop it reads 1 lb or so and the readings
+// survive; on 2026-09-10 it reads 4.6 pp against neighbours that never moved.
+//
+// ROBUST_BW is 3 days, half the tightest bandwidth the trend line itself will
+// use, and it has to be that tight. The December drop is an elbow — steep, then
+// flat — and a line fitted over six days cannot sit on an elbow: at six days it
+// still put 163.6 lbs 4 lbs from its own prediction and threw the reading out.
+// Three days keeps the predictor local enough to follow the corner. The cost is
+// a noisier prediction, which is self-correcting, since the threshold is read
+// off the spread of these same deviations.
+//
+// What survives this is as telling as what does not. On weight it rejects three
+// readings in eleven years — 2015-03-29, 2017-04-28, 2021-03-14 — and all three
+// are the same shape: three to four pounds above both neighbours and back down
+// by the next morning. That is the signature it is built to find.
+//
+// It has a second property worth naming: a multi-day excursion, where the
+// neighbours move WITH the reading, produces a small deviation and survives.
+// That is right. Three days of water retention is physiology the trend should
+// show; one session disagreeing with the sessions either side of it is not.
+//
+// ── Scale and eligibility ────────────────────────────────────────────────────
+// The deviation is divided by the local spread of that same statistic, read
+// over the fit's own kernel, so noisy eras set a wider threshold than quiet
+// ones. Since the statistic is trend-free, its spread is a genuine noise scale
+// — which is what a residual MAD was failing to be. The floor is sqrt(nugget),
+// the irreducible per-reading noise the variogram measured, so a run of
+// identical readings cannot drive the scale to zero and start rejecting
+// ordinary scatter.
+//
+// A reading is only judged when ROBUST_COMPANY others sit within SIGMA_MIN days
+// of it. Rejecting a reading is a claim that its neighbours contradict it, so
+// one with no near neighbours cannot be rejected — nothing is available to do
+// the contradicting, and a body really can move seven pounds between weigh-ins
+// three weeks apart. SIGMA_MIN is the radius because it is the smoother's
+// tightest bandwidth: the scale below which this model declines to resolve
+// anything, and therefore the window within which two readings are claims about
+// the same underlying level.
+//
+// Without that guard the sparse years lost readings that were merely alone —
+// 167.6 lbs on 2016-12-29, the only weigh-in in five months either side; 172.4
+// on 2023-02-12, the first after an eight-month break; 176.0 on 2026-01-13,
+// three weeks clear of anything. With it, 2026-09-10 has five readings inside
+// six days and is judged; those three have one, zero and zero, and are left be.
+//
+// Four sigma does nothing to ordinary noise. Over the current history this
+// rejects one reading in 1167 on fat% — 2026-09-10 — and three on weight, where
+// 181.4 lbs that same morning was unremarkable and stayed in.
+//
+// The screen never consults the fit, so there is nothing to iterate: the weights
+// are the same whatever the trend line does, which also means they cannot
+// oscillate or depend on where the fit started.
+//
+// Below ROBUST_MIN_N the scale estimate is itself too noisy to be trusted with
+// the power to delete data, so short series keep plain least squares.
+const ROBUST_BW = 3;          // days — bandwidth of the leave-one-out predictor
+const ROBUST_SIGMA = 4;       // reject beyond this many local sigmas
+const ROBUST_COMPANY = 4;     // close readings required before one is judged at all
+const ROBUST_MIN_N = 10;      // fewer readings than this: no screen
+const ROBUST_EPS = 1e-3;      // at or below this a reading counts as dropped
+const MAD_TO_SIGMA = 1.4826;  // median|z| = 0.6745 sigma for a Gaussian
+
+// ── Gaps: where the band has nothing to say ──────────────────────────────────
+// Across a long gap the local line is extrapolating from both sides at once,
+// and the variance of an extrapolated slope grows without bound toward the
+// middle. The band there ran clear off the top and bottom of the panel. It was
+// not wrong — that really is the uncertainty of a trend nobody measured — but
+// it answered a question nobody asked, and it dragged the y-range badly enough
+// to flatten the stretches that DO carry information.
+//
+// A day is supported when a reading the fit actually believes sits within one
+// bandwidth of it. Sigma already tracks local density, so this adapts on its
+// own: a sparse-but-regular stretch stays supported, and only a genuine gap —
+// one much longer than the spacing around it — fails the test.
+//
+// Unsupported runs get the band HALF-WIDTH linearly interpolated between the
+// supported days bracketing them, then re-centred on the trend line. Half-width
+// rather than the two edges, so the ribbon stays centred on a line that may be
+// sloping through the gap; and it is continuous at both joins, since the
+// interpolation reproduces the bracketing widths exactly there. A run with no
+// supported day on one side — which only happens when robustness disowns a
+// reading at the very end of the series — holds the last good width flat.
+//
+// Be clear about what the bridged band is, though: it is not a 95% interval.
+// Simulated against the real cadence it covers 73.6% inside gaps, against 95.6%
+// on supported days, which is the nominal target and unchanged by any of this.
+// It is a visual join between two intervals that ARE 95%, and the honest reading
+// of the middle of a gap is that nothing was measured there. The alternative was
+// a technically-correct band averaging 23 pp on a chart whose data spans 8 — so
+// wide it flattened everything else to a line. Interpolation is the lesser lie,
+// and the markers show where the readings actually are.
+//
+// The trend LINE is left alone throughout. A local line across a gap is a
+// legitimate interpolation and stays bounded; only its band blew up.
+
 // ── Confidence band ───────────────────────────────────────────────────────
 // The band answers the only question the trend line is actually being asked:
 // is today's line genuinely below last month's, or is that the noise talking?
@@ -234,6 +365,23 @@ function movingAverage(arr, halfWidth) {
     });
 }
 
+// Median of a short list. Sorts a copy; TypedArray sorts numerically.
+function median(arr) {
+    if (!arr.length) return 0;
+    const s = Float64Array.from(arr).sort();
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+// Tukey biweight on an already-scaled residual: 1 at the centre, falling to 0
+// at u = 1 with a zero derivative there, so a reading drifting toward the
+// threshold loses influence smoothly instead of snapping out of the fit.
+function biweight(u) {
+    if (!(u < 1)) return 0;
+    const a = 1 - u * u;
+    return a * a;
+}
+
 // Splits the noise into its independent and its persistent halves by fitting
 // gamma(d) = nugget + sill·(1 - p^d) to the empirical variogram.
 //
@@ -304,6 +452,11 @@ function noiseFromVariogram(dayIdx, vals) {
 // Returns { x, y, lo, hi } — lo/hi are the 95% band, and null on any day whose
 // kernel holds a single isolated reading, which has no residual to speak of and
 // so supports no band at all.
+//
+// The fit is robust: readings their own close neighbours contradict are
+// downweighted out of it rather than followed, and they still appear as
+// markers. Across gaps the band is interpolated instead of extrapolated. Both
+// are documented up by ROBUST_SIGMA.
 function gaussianSmooth(dates, values, windowDays, stdDays) {
     const bare = { x: dates, y: values, lo: [], hi: [] };
     if (dates.length < 3) return bare;
@@ -352,6 +505,86 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
         }
     }
 
+    const fit = new Float64Array(nDays);
+    const selfW = new Float64Array(nDays);   // l of a UNIT-weight reading on its own day
+    const sumL2 = new Float64Array(nDays);   // SUM l², the reciprocal of n_eff
+    const varFac = new Float64Array(nDays);  // variance factor, correlation and all
+    const nearest = new Float64Array(nDays); // days to the closest believed reading
+    const lo = new Int32Array(nDays), hi = new Int32Array(nDays);
+    const ok = new Uint8Array(nDays);
+    const wbuf = new Float64Array(pts.length);   // kernel weights, reused per day
+    const resid = new Float64Array(pts.length);
+    const lev = new Float64Array(pts.length);
+
+    // ── The screen ──────────────────────────────────────────────────────────
+    // dev is the reading's gap to what its close neighbours predict for its day,
+    // the neighbours fitted as a LINE and the reading itself left out; see the
+    // note by ROBUST_SIGMA. It reads only the data, never the fit, so it is
+    // computed once and the fit below runs a single time.
+    //
+    // A line and not a median of the neighbouring values, because a median is
+    // not trend-free after all: in a steep run it returns whichever side is
+    // better represented, so 166.4 lbs on 2023-11-28 — sitting exactly halfway
+    // down the drop, between 171.6 and 163.6 — was measured against the 171.6
+    // above it and came out 5.2 lbs adrift. A line through the same neighbours
+    // predicts 168-ish and it is 1.6 off, which is the truth of it.
+    //
+    // Leaving the reading out is what makes this a test rather than a
+    // description. Included, it would pull the prediction toward itself and an
+    // isolated reading would partly excuse itself — most of all at the right
+    // edge, where there is least else to hold the line down.
+    const rw = new Float64Array(pts.length).fill(1);
+    if (pts.length >= ROBUST_MIN_N) {
+        const nearMs = SIGMA_MIN * dayMs;        // company radius, fixed
+        const reachMs = Math.max(ROBUST_BW * 3, SIGMA_MIN) * dayMs;
+        const dev = new Float64Array(pts.length);
+        const judged = new Uint8Array(pts.length);
+        const buf = [];
+        for (let j = 0; j < pts.length; j++) {
+            const a = lowerBound(ts, ts[j] - reachMs);
+            const b = lowerBound(ts, ts[j] + reachMs + 1);
+            let company = 0, s0 = 0, s1 = 0, s2 = 0, b0 = 0, b1 = 0;
+            for (let k = a; k < b; k++) {
+                if (k === j) continue;
+                const gap = Math.abs(ts[k] - ts[j]);
+                const u = (ts[k] - ts[j]) / dayMs;
+                if (gap <= nearMs) company++;
+                const w = Math.exp(-0.5 * (u / ROBUST_BW) ** 2);
+                s0 += w; s1 += w * u; s2 += w * u * u;
+                b0 += w * pts[k].v; b1 += w * u * pts[k].v;
+            }
+            if (company < ROBUST_COMPANY || !(s0 > 0)) continue;
+
+            // Value of the fitted line at u = 0. Degenerates to the weighted
+            // mean when the neighbours identify no slope, exactly as the main
+            // fit does.
+            const den = s0 * s2 - s1 * s1;
+            const pred = den > 1e-9 * s0 * s2 ? (s2 * b0 - s1 * b1) / den : b0 / s0;
+            dev[j] = pts[j].v - pred;
+            judged[j] = 1;
+        }
+
+        // Scale from the spread of dev around each reading, over a wide window
+        // so the median has plenty to work with. dev is trend-free, so this is
+        // a genuine noise scale rather than a measure of how hard the trend is
+        // turning — which is precisely what a residual spread failed to be.
+        const floorScale = noise ? Math.sqrt(noise.nugget) : 0;
+        const spanMs = SIGMA_MAX * 3 * dayMs;
+        for (let j = 0; j < pts.length; j++) {
+            if (!judged[j]) continue;
+            buf.length = 0;
+            for (let k = j - 1; k >= 0 && ts[j] - ts[k] <= spanMs; k--) {
+                if (judged[k]) buf.push(Math.abs(dev[k]));
+            }
+            for (let k = j; k < pts.length && ts[k] - ts[j] <= spanMs; k++) {
+                if (judged[k]) buf.push(Math.abs(dev[k]));
+            }
+            const sigma = Math.max(MAD_TO_SIGMA * median(buf), floorScale);
+            if (!(sigma > 0)) continue;
+            rw[j] = biweight(Math.abs(dev[j]) / (ROBUST_SIGMA * sigma));
+        }
+    }
+
     // Pass 1 — the fit.
     //
     // The local line makes every output day a weighted least squares of two
@@ -359,24 +592,22 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     // of the readings: fit = SUM l_j·y_j with SUM l_j = 1. Those effective
     // weights l are what the standard error needs — SUM l² plays the role
     // (SUM w)²/SUM w² played for a mean, and 1/SUM l² is the effective count.
-    const fit = new Float64Array(nDays);
-    const selfW = new Float64Array(nDays);   // l of a reading on its own day
-    const sumL2 = new Float64Array(nDays);   // SUM l², the reciprocal of n_eff
-    const varFac = new Float64Array(nDays);  // variance factor, correlation and all
-    const lo = new Int32Array(nDays), hi = new Int32Array(nDays);
-    const ok = new Uint8Array(nDays);
-    const wbuf = new Float64Array(pts.length);   // kernel weights, reused per day
+    //
+    // The kernel weight carries the screen's weight with it, so a reading the
+    // screen disowned is simply not in this regression.
     for (let i = 0; i < nDays; i++) {
         const t = grid[i], sigma = sigmas[i], cutoff = sigma * 3 * dayMs;
         const a = lowerBound(ts, t - cutoff), b = lowerBound(ts, t + cutoff + 1);
         lo[i] = a; hi[i] = b;
-        let s0 = 0, s1 = 0, s2 = 0;
+        let s0 = 0, s1 = 0, s2 = 0, near = Infinity;
         for (let j = a; j < b; j++) {
             const u = (ts[j] - t) / dayMs;
-            const w = Math.exp(-0.5 * (u / sigma) ** 2);
+            const w = rw[j] * Math.exp(-0.5 * (u / sigma) ** 2);
             wbuf[j] = w;
             s0 += w; s1 += w * u; s2 += w * u * u;
+            if (rw[j] > ROBUST_EPS && Math.abs(u) < near) near = Math.abs(u);
         }
+        nearest[i] = near;
         if (!(s0 > 0)) continue;
 
         // s0·s2 - s1² collapses toward zero when the window's readings are all
@@ -436,13 +667,16 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     // L_jj is the reading's own effective weight, Σ_k L_jk² is SUM l² there.
     // The identity holds for any linear smoother, so the local line uses it
     // unchanged — only the weights it is evaluated on have changed.
-    const resid = new Float64Array(pts.length);
-    const lev = new Float64Array(pts.length);
+    //
+    // L_jj carries the screen's weight: selfW is the unit-weight value, and a
+    // disowned reading pulls its own fit nowhere, so its residual is not shrunk
+    // at all.
     for (let j = 0; j < pts.length; j++) {
         const gi = Math.round((ts[j] - start) / dayMs);
+        resid[j] = 0; lev[j] = 0;
         if (!ok[gi]) continue;
         resid[j] = pts[j].v - fit[gi];
-        lev[j] = 1 - 2 * selfW[gi] + sumL2[gi];
+        lev[j] = 1 - 2 * rw[j] * selfW[gi] + sumL2[gi];
     }
 
     // The residual track has the right SHAPE — it finds the noisy stretches —
@@ -452,21 +686,31 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     // touched. Only ever upward: residuals noisier than the variogram means the
     // trend line is missing real structure, and the wider band is the honest
     // reading of that.
+    //
+    // Weighted by rw for the same reason pass 3 is: a disowned reading's
+    // residual is not a draw from the noise, so letting it into this ratio
+    // would shrink `scale` on the strength of the one reading the model has
+    // already decided it cannot explain.
     let scale = 1;
     if (noise) {
         let sr = 0, sl = 0;
-        for (let j = 0; j < pts.length; j++) { sr += resid[j] * resid[j]; sl += lev[j]; }
+        for (let j = 0; j < pts.length; j++) {
+            sr += rw[j] * resid[j] * resid[j];
+            sl += rw[j] * lev[j];
+        }
         if (sr > 0 && sl > 0) scale = Math.max(1, noise.variance / (sr / sl));
     }
 
     // Pass 3 — local residual variance through the same kernel, then the band.
-    const xs = [], ys = [], loBand = [], hiBand = [];
+    // The half-width is kept rather than the two edges, so the gap fill below
+    // can interpolate it and re-centre on the trend line.
+    const xs = [], ys = [], halfW = [], sup = [];
     for (let i = 0; i < nDays; i++) {
         if (!ok[i]) continue;
         const t = grid[i], sigma = sigmas[i];
         let sr = 0, sc = 0, sw = 0, sw2 = 0;
         for (let j = lo[i]; j < hi[i]; j++) {
-            const w = Math.exp(-0.5 * (((ts[j] - t) / dayMs) / sigma) ** 2);
+            const w = rw[j] * Math.exp(-0.5 * (((ts[j] - t) / dayMs) / sigma) ** 2);
             sr += w * resid[j] * resid[j];
             sc += w * lev[j];
             sw += w; sw2 += w * w;
@@ -488,14 +732,40 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
             // counts the boundary: at the last day it drove df to 1, floored
             // it at 3, and roughly doubled the band over what the data
             // supported (99-100% coverage where 95% was asked for).
+            //
+            // rw rides along in w here too, so dfVar counts believed readings
+            // only: dropping one genuinely costs a degree of freedom, and the
+            // band widens by the t multiplier to say so.
             const dfVar = sw * sw / sw2 - 2;
-            const half = t95(dfVar) * Math.sqrt((sr / sc) * scale * varFac[i]);
-            loBand.push(fit[i] - half);
-            hiBand.push(fit[i] + half);
+            halfW.push(t95(dfVar) * Math.sqrt((sr / sc) * scale * varFac[i]));
         } else {
-            loBand.push(null);
-            hiBand.push(null);
+            halfW.push(NaN);
         }
+        sup.push(nearest[i] <= sigmas[i] && isFinite(halfW[halfW.length - 1]) ? 1 : 0);
+    }
+
+    // Gap fill — see the note by the gap constants. Runs of unsupported days take a
+    // linear ramp in half-width between the supported days that bracket them;
+    // a run open at one end holds the width it has.
+    for (let i = 0; i < sup.length; ) {
+        if (sup[i]) { i++; continue; }
+        let j = i;
+        while (j < sup.length && !sup[j]) j++;
+        const a = i - 1, b = j;
+        const haveA = a >= 0, haveB = b < sup.length;
+        for (let k = i; k < j; k++) {
+            if (haveA && haveB) halfW[k] = halfW[a] + (halfW[b] - halfW[a]) * ((k - a) / (b - a));
+            else if (haveA) halfW[k] = halfW[a];
+            else if (haveB) halfW[k] = halfW[b];
+        }
+        i = j;
+    }
+
+    const loBand = [], hiBand = [];
+    for (let i = 0; i < xs.length; i++) {
+        const h = halfW[i];
+        loBand.push(isFinite(h) ? ys[i] - h : null);
+        hiBand.push(isFinite(h) ? ys[i] + h : null);
     }
     return { x: xs, y: ys, lo: loBand, hi: hiBand };
 }
