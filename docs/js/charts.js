@@ -198,17 +198,31 @@ const MAD_TO_SIGMA = 1.4826;  // median|z| = 0.6745 sigma for a Gaussian
 // supported day on one side — which only happens when robustness disowns a
 // reading at the very end of the series — holds the last good width flat.
 //
-// Be clear about what the bridged band is, though: it is not a 95% interval.
-// Simulated against the real cadence it covers 73.6% inside gaps, against 95.6%
-// on supported days, which is the nominal target and unchanged by any of this.
-// It is a visual join between two intervals that ARE 95%, and the honest reading
-// of the middle of a gap is that nothing was measured there. The alternative was
-// a technically-correct band averaging 23 pp on a chart whose data spans 8 — so
-// wide it flattened everything else to a line. Interpolation is the lesser lie,
-// and the markers show where the readings actually are.
+// The LINE gets the same treatment, for a worse version of the same disease.
+// A local line evaluated where every reading in its kernel sits a hundred days
+// off to one side is not interpolating, it is extrapolating a slope read from
+// near-collinear points: s0·s2 - s1² very nearly cancels, and what survives is
+// noise divided by almost nothing. The weight trend ran to +347 and -211 lbs on
+// 26 days inside the long gaps, from readings that span 156 to 184. Those days
+// are exactly the unsupported ones, so the same ramp bridges them, and the fit
+// is now bounded by the two values it joins.
 //
-// The trend LINE is left alone throughout. A local line across a gap is a
-// legitimate interpolation and stays bounded; only its band blew up.
+// Bridging the line is also what rescues the band's honesty, and that was a
+// surprise. Against a ramped half-width alone the band covered 73.6% inside
+// gaps, because it was still centred on that runaway extrapolation. Centred on
+// the straight join instead it covers 95.7%, against 95.6% on supported days —
+// so the bridge is not the approximation it looks like. A line between the two
+// readings either side of a gap is simply a better estimate of an unobserved
+// stretch than a slope read off collinear points a hundred days away, which is
+// the whole reason the extrapolation had to be so wide to cover at all.
+//
+// None of which makes it a measurement. The honest reading of the middle of a
+// gap is that nothing was measured there, and the markers show where the
+// readings actually are.
+//
+// Readings always fall on supported days — a reading is zero days from itself —
+// so residuals and the band are computed before any of this and none of them
+// depend on a bridged value.
 
 // ── Confidence band ───────────────────────────────────────────────────────
 // The band answers the only question the trend line is actually being asked:
@@ -754,9 +768,15 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
         const a = i - 1, b = j;
         const haveA = a >= 0, haveB = b < sup.length;
         for (let k = i; k < j; k++) {
-            if (haveA && haveB) halfW[k] = halfW[a] + (halfW[b] - halfW[a]) * ((k - a) / (b - a));
-            else if (haveA) halfW[k] = halfW[a];
-            else if (haveB) halfW[k] = halfW[b];
+            if (haveA && haveB) {
+                const f = (k - a) / (b - a);
+                ys[k] = ys[a] + (ys[b] - ys[a]) * f;
+                halfW[k] = halfW[a] + (halfW[b] - halfW[a]) * f;
+            } else if (haveA) {
+                ys[k] = ys[a]; halfW[k] = halfW[a];
+            } else if (haveB) {
+                ys[k] = ys[b]; halfW[k] = halfW[b];
+            }
         }
         i = j;
     }
