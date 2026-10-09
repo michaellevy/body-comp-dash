@@ -73,6 +73,25 @@ const CFG = { displayModeBar: false, responsive: true };
 // independent all along. It costs nothing in lag, because a local line follows
 // a straight trend at any bandwidth; that is what made this affordable, and
 // with a local mean it would not have been.
+//
+// But only half the inflation, the SQUARE ROOT of it, because "costs nothing
+// in lag" holds only while the trend is straight, and a body under a cut is
+// not straight. It sits flat, then turns. The full factor is about 9.5 on daily
+// weigh-ins, which pinned sigma at SIGMA_MAX. That is a kernel reaching three
+// months either side, and it could not see that weight held at 182.5 from
+// mid-August into September and only then started down. It drew one long
+// slope through both, ran 0.7 lbs under every reading for four weeks, and
+// left more than half of them above a band that cannot see smoothing bias.
+//
+// The exponent is the bias-variance trade, so it was chosen on held-out data:
+// 14-day blocks left out in turn, with a 3-day buffer so persistent noise
+// cannot leak across the cut. On weight, prediction error falls from 1.63 to
+// 1.54 lbs going from the full factor to its square root and climbs again on
+// either side. The band comes out about a fifth wider (1.20 lbs against 1.01
+// over the last year), and that is the honest price: the narrower one was
+// buying its confidence with bias. Fat% is indifferent to the choice (0.86 to
+// 0.87), and tape series are too sparse for the variogram to report any
+// stickiness at all, so they don't notice.
 const SIGMA_MIN = 6;     // days — daily weighing; tighter than this tracks noise
 const SIGMA_MAX = 45;    // days — beyond this even a local line goes rigid
 const SIGMA_SPAN = 6;    // sigma spans about this many typical gaps
@@ -105,9 +124,10 @@ const SIGMA_BLEND = 21;  // days — sigma is itself smoothed over this half-wid
 // and this quietly eating data.
 //
 // Residuals will not do the job, because this smoother is deliberately wide.
-// Weight noise is sticky (rho 0.85), so the bandwidth inflates to SIGMA_MAX to
-// buy back the independence, and a 45-day local line cannot turn fast. Through
-// the nine-pound fortnight of late 2023 the fit sat at 168.6 while the readings
+// Weight noise is sticky (rho 0.85), so the bandwidth inflates to buy back
+// some of the independence, and a local line weeks wide cannot turn fast. When
+// the bandwidth ran all the way to SIGMA_MAX, through the nine-pound fortnight
+// of late 2023 the fit sat at 168.6 while the readings
 // were at 163.4, so residuals ran to 5 lbs on data that was never in doubt:
 // 163.6 and 163.4 on 2023-12-01 and 12-03 agree with each other and with the
 // 164-166 on either side. That is smoothing bias, and rejecting readings for it
@@ -505,7 +525,7 @@ function gaussianSmooth(dates, values, windowDays, stdDays) {
     for (let j = 0; j < pts.length; j++) dayIdx.push(Math.round((ts[j] - start) / dayMs));
     const noise = noiseFromVariogram(dayIdx, pts.map(p => p.v));
 
-    const inflations = spacing.map(sp => arInflation(noise, sp));
+    const inflations = spacing.map(sp => Math.sqrt(arInflation(noise, sp)));
     const sigmas = movingAverage(
         rawSpacing.map((sp, i) => sigmaFor(sp, inflations[i], stdDays)), SIGMA_BLEND);
 
