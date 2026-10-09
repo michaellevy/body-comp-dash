@@ -1,4 +1,4 @@
-const CACHE = 'bodycomp-v29';
+const CACHE = 'bodycomp-v30';
 const ASSETS = [
     './',
     './index.html',
@@ -12,7 +12,7 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', e => {
-    e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+    e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' })))));
     self.skipWaiting();
 });
 
@@ -26,12 +26,23 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-    // Always go to network for the GitHub API; cache-first for static assets.
+    // Always go to network for the GitHub API. Static assets are network-first
+    // too, falling back to the cache only offline: cache-first served the old
+    // code on every load after a deploy, and the new worker's cache never got
+    // a page to hand its files to.
     if (e.request.url.includes('api.github.com') || e.request.url.includes('gist.githubusercontent.com')) {
         e.respondWith(fetch(e.request));
     } else {
         e.respondWith(
-            caches.match(e.request).then(r => r || fetch(e.request))
+            fetch(e.request, { cache: 'no-cache' })
+                .then(r => {
+                    if (r.ok && e.request.method === 'GET') {
+                        const copy = r.clone();
+                        caches.open(CACHE).then(c => c.put(e.request, copy));
+                    }
+                    return r;
+                })
+                .catch(() => caches.match(e.request))
         );
     }
 });
