@@ -1,4 +1,4 @@
-const CACHE = 'bodycomp-v31';
+const CACHE = 'bodycomp-v32';
 const ASSETS = [
     './',
     './index.html',
@@ -42,7 +42,7 @@ self.addEventListener('fetch', e => {
                     }
                     return r;
                 })
-                .catch(() => caches.match(e.request))
+                .catch(() => caches.match(e.request, { ignoreSearch: true }))
         );
     }
 });
