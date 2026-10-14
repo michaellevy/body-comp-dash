@@ -1,8 +1,8 @@
 {
-    "id": "body-comp-dash-v2",
+    "id": "./",
     "name": "Body Comp",
     "short_name": "Body Comp",
-    "start_url": "./?app=2",
+    "start_url": "./",
     "scope": "./",
     "display": "standalone",
     "background_color": "#f8f9fa",
